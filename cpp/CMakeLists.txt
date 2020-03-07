@@ -191,9 +191,11 @@ add_executable(katago
   tests/testtime.cpp
   tests/testtrainingwrite.cpp
   tests/testnn.cpp
+  distributed/client.cpp
   analysis.cpp
   benchmark.cpp
   commandline.cpp
+  contribute.cpp
   evalsgf.cpp
   gatekeeper.cpp
   gtp.cpp
