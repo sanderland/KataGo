@@ -77,11 +77,11 @@ int main(int argc, const char* argv[]) {
 
 
 string Version::getKataGoVersion() {
-  return string("1.4.5+kt1.3.3");
+  return string("1.5.0+kt1.3.5");
 }
 
 string Version::getKataGoVersionForHelp() {
-  return string("KataGo v1.4.5+kt1.3.3 (minified)");
+  return string("KataGo v1.5.0+kt1.3.5 (minified,fasteigen)");
 }
 
 string Version::getKataGoVersionFullInfo() {
@@ -93,6 +93,8 @@ string Version::getKataGoVersionFullInfo() {
   out << "Using CUDA backend" << endl;
 #elif defined(USE_OPENCL_BACKEND)
   out << "Using OpenCL backend" << endl;
+#elif defined(USE_EIGEN_BACKEND)
+  out << "Using Eigen(CPU) backend" << endl;
 #else
   out << "Using dummy backend" << endl;
 #endif

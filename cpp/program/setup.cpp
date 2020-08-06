@@ -48,6 +48,8 @@ vector<NNEvaluator*> Setup::initializeNNEvaluators(
   string backendPrefix = "cuda";
   #elif defined(USE_OPENCL_BACKEND)
   string backendPrefix = "opencl";
+  #elif defined(USE_EIGEN_BACKEND)
+  string backendPrefix = "eigen";
   #else
   string backendPrefix = "dummybackend";
   #endif
@@ -58,6 +60,8 @@ vector<NNEvaluator*> Setup::initializeNNEvaluators(
     cfg.markAllKeysUsedWithPrefix("cuda");
   if(backendPrefix != "opencl")
     cfg.markAllKeysUsedWithPrefix("opencl");
+  if(backendPrefix != "eigen")
+    cfg.markAllKeysUsedWithPrefix("eigen");
   if(backendPrefix != "dummybackend")
     cfg.markAllKeysUsedWithPrefix("dummybackend");
 
@@ -487,6 +491,10 @@ vector<SearchParams> Setup::loadParams(
       params.nnPolicyTemperature = cfg.getFloat("nnPolicyTemperature",0.01f,5.0f);
     else
       params.nnPolicyTemperature = 1.0f;
+
+    if(cfg.contains("antiMirror"+idxStr)) params.antiMirror = cfg.getBool("antiMirror"+idxStr);
+    else if(cfg.contains("antiMirror"))   params.antiMirror = cfg.getBool("antiMirror");
+    else                                  params.antiMirror = false;
 
     if(cfg.contains("mutexPoolSize"+idxStr)) params.mutexPoolSize = (uint32_t)cfg.getInt("mutexPoolSize"+idxStr, 1, 1 << 24);
     else if(cfg.contains("mutexPoolSize"))   params.mutexPoolSize = (uint32_t)cfg.getInt("mutexPoolSize",        1, 1 << 24);

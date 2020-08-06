@@ -26,7 +26,7 @@ endif()
 
 set(USE_BACKEND CACHE STRING "Neural net backend")
 string(TOUPPER "${USE_BACKEND}" USE_BACKEND)
-set_property(CACHE USE_BACKEND PROPERTY STRINGS "" CUDA OPENCL)
+set_property(CACHE USE_BACKEND PROPERTY STRINGS "" CUDA OPENCL EIGEN)
 
 set(USE_TCMALLOC 0 CACHE BOOL "Use TCMalloc")
 set(NO_GIT_REVISION 0 CACHE BOOL "Disable embedding the git revision into the compiled exe")
@@ -37,12 +37,15 @@ message("Building 'katago' executable for GTP engine and other tools")
 if(USE_BACKEND STREQUAL "CUDA")
   message("-DUSE_BACKEND=CUDA, using CUDA backend")
 
-  # Ensure dynamic cuda linking
-  set(CMAKE_CUDA_FLAGS "" CACHE STRING "")
-  if(CMAKE_CUDA_FLAGS)
-    list(REMOVE_ITEM CMAKE_CUDA_FLAGS "-cudart static")
+  
+  # Ensure dynamic cuda linking (Versions prior to 3.17)
+  if (${CMAKE_VERSION} VERSION_LESS "3.17")
+    set(CMAKE_CUDA_FLAGS "" CACHE STRING "")
+    if(CMAKE_CUDA_FLAGS)
+      list(REMOVE_ITEM CMAKE_CUDA_FLAGS "-cudart static")
+    endif()
+    string(APPEND CMAKE_CUDA_FLAGS "-cudart shared")
   endif()
-  string(APPEND CMAKE_CUDA_FLAGS "-cudart shared")
 
   enable_language(CUDA)
 
@@ -61,6 +64,12 @@ if(USE_BACKEND STREQUAL "CUDA")
   endif()
 
   set(CUDA_STANDARD 11)
+  
+  # Ensure dynamic cuda linking (Versions from 3.17)
+  if (${CMAKE_VERSION} VERSION_GREATER "3.16")
+    set(CMAKE_CUDA_RUNTIME_LIBRARY SHARED)
+  endif()
+
   set(NEURALNET_BACKEND_SOURCES neuralnet/cudabackend.cpp neuralnet/cudahelpers.cu)
   set(CMAKE_CUDA_FLAGS
     "-gencode arch=compute_30,code=sm_30 -gencode arch=compute_30,code=compute_30 -gencode arch=compute_37,code=sm_37 -gencode arch=compute_53,code=sm_53 -gencode arch=compute_53,code=compute_53 -gencode arch=compute_70,code=sm_70 -gencode arch=compute_70,code=compute_70"
@@ -72,6 +81,11 @@ elseif(USE_BACKEND STREQUAL "OPENCL")
     neuralnet/openclkernels.cpp
     neuralnet/openclhelpers.cpp
     neuralnet/opencltuner.cpp
+    )
+elseif(USE_BACKEND STREQUAL "EIGEN")
+  message("-DUSE_BACKEND=EIGEN, using Eigen CPU backend")
+  set(NEURALNET_BACKEND_SOURCES
+    neuralnet/eigenbackend.cpp
     )
 elseif(USE_BACKEND STREQUAL "")
   message(WARNING "${ColorBoldRed}WARNING: Using dummy neural net backend, intended for non-neural-net testing only, will fail on any code path requiring a neural net. To use neural net, specify -DUSE_BACKEND=CUDA or -DUSE_BACKEND=OPENCL to compile with the respective backend.${ColorReset}")
@@ -201,6 +215,11 @@ elseif(USE_BACKEND STREQUAL "OPENCL")
   include_directories(${OpenCL_INCLUDE_DIRS})
   link_directories(${OpenCL_LIBRARY})
   target_link_libraries (katago ${OpenCL_LIBRARY})
+elseif(USE_BACKEND STREQUAL "EIGEN")
+  target_compile_definitions(katago PRIVATE USE_EIGEN_BACKEND)
+  find_package(Eigen3 REQUIRED)
+  include_directories(SYSTEM ${EIGEN3_INCLUDE_DIRS})
+  message("Found Eigen3 at ${EIGEN3_INCLUDE_DIRS}")
 endif()
 
 if(NO_GIT_REVISION)
