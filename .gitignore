@@ -1,4 +1,6 @@
 .vscode
+.vs
+saved_model*
 .idea
 
 *.[oa]
