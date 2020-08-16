@@ -5,7 +5,8 @@
  * Only supports float32 computation with NHWC memory layout (at runtime and as input).
  */
 
-// CR lpuchallafiore: Add multi-threading support (see "Evaluating with a Thread Pool" in the Eigen Tensor docs).
+//TODO someday - not sure how to make thread pool work with TensorMap. It works with Tensor, but TensorMap doesn't seem to have a device(...) method.
+//#define EIGEN_USE_THREADS
 
 #include "../neuralnet/nninterface.h"
 
@@ -194,22 +195,6 @@ static void poolRowsGPool(CONSTTENSORMAP4* in, TENSORMAP2* out, const float* mas
   }
 }
 
-// // Given input [n,w,h,c] fills output of shape [n,c] with sum over c.
-// static void poolRowsSum(CONSTTENSORMAP4* in, TENSORMAP2* out, float scaleSum) {
-//   for (int n = 0; n < in->dimension(3); n++) {
-//     for (int c = 0; c < in->dimension(0); c++) {
-//       float s = 0.f;
-//       for (int h = 0; h < in->dimension(2); h++) {
-//         for (int w = 0; w < in->dimension(1); w++) {
-//           float x = in(c, w, h, n);
-//           s += x;
-//         }
-//       }
-//       out(c, n) = s * scaleSum;
-//     }
-//   }
-// }
-
 static void poolRowsValueHead(CONSTTENSORMAP4* in, TENSORMAP2* out, const float* maskSum) {
   for (int n = 0; n < in->dimension(3); n++) {
     for (int c = 0; c < in->dimension(0); c++) {
@@ -230,26 +215,53 @@ static void poolRowsValueHead(CONSTTENSORMAP4* in, TENSORMAP2* out, const float*
   }
 }
 
-// Layers --------------------------------------------------------------------------------------------------------------
+static size_t roundUpToMultiple(size_t size, size_t ofThis) {
+  return (size + ofThis - 1) / ofThis * ofThis;
+}
 
+// --------------------------------------------------------------------------------------------------------------
+
+struct ComputeHandleInternal {
+  //static constexpr int numEigenThreads = 2;
+  //Eigen::ThreadPool threadPool;
+  //Eigen::ThreadPoolDevice device;
+
+  ComputeHandleInternal()
+  {
+  }
+};
+
+// Layers --------------------------------------------------------------------------------------------------------------
 
 // Convolution layer with zero-padding.
 struct ConvLayer {
   string name;
 
-  Eigen::array<pair<int, int>, 4> paddings;
-  TENSOR2 cooked_kernel;
-  int k_w, k_h, k_ic, k_oc, vector_size;
-  int inChannels, outChannels;
+  TENSOR2 imagePatchKernel;
+  TENSOR3 winogradKernel;
+  int inChannels;
+  int outChannels;
+
+  int convYSize;
+  int convXSize;
+  int nnXLen;
+  int nnYLen;
+
+  int imagePatchSize;
+
+  int numTilesX;
+  int numTilesY;
+  int inTileXYSize;
+  int outTileXYSize;
 
   ConvLayer() = delete;
   ConvLayer(const ConvLayer&) = delete;
   ConvLayer& operator=(const ConvLayer&) = delete;
 
-  ConvLayer(const ConvLayerDesc& desc) {
+  ConvLayer(const ConvLayerDesc& desc, int nnX, int nnY) {
     name = desc.name;
-    int convYSize = desc.convYSize;
-    int convXSize = desc.convXSize;
+    convYSize = desc.convYSize;
+    convXSize = desc.convXSize;
     inChannels = desc.inChannels;
     outChannels = desc.outChannels;
     //Currently eigen impl doesn't support dilated convs
@@ -261,37 +273,379 @@ struct ConvLayer {
 
     assert(convXSize % 2 == 1);
     assert(convYSize % 2 == 1);
-    
-    TENSOR4 kernel;
-    kernel = TensorMap<const Tensor<const SCALAR, 4>>(
-      desc.weights.data(), convXSize, convYSize, inChannels, outChannels);
-    k_w = kernel.dimension(0);
-    k_h = kernel.dimension(1);
-    k_ic = kernel.dimension(2);
-    k_oc = kernel.dimension(3);
-    vector_size = k_ic * k_w * k_h;
-    Eigen::array<int, 4> matched_order({3, 2, 0, 1});
-    Eigen::array<int, 2> as_row_vectors({k_oc, vector_size});
-    cooked_kernel = kernel.shuffle(matched_order).reshape(as_row_vectors);
+
+    nnXLen = nnX;
+    nnYLen = nnY;
+
+    if((convXSize == 3 && convYSize == 3) || (convXSize == 5 && convYSize == 5)) {
+      imagePatchSize = 0; //not used in this branch
+
+      const int inTileXSize = 6;
+      const int inTileYSize = 6;
+      const int outTileXSize = convXSize == 5 ? 2 : 4;
+      const int outTileYSize = convYSize == 5 ? 2 : 4;
+
+      numTilesX = (nnXLen + outTileXSize - 1) / outTileXSize;
+      numTilesY = (nnYLen + outTileYSize - 1) / outTileYSize;
+      inTileXYSize = inTileXSize * inTileYSize;
+      outTileXYSize = outTileXSize * outTileYSize;
+
+      static constexpr int maxTileXSize = 6;
+      static constexpr int maxTileYSize = 6;
+
+      //INTILE_YSIZE, INTILE_XSIZE, ic, oc
+      vector<float> transWeights(inTileXYSize * inChannels * outChannels);
+      auto transform3x3_6 = [](float& a0, float& a1, float& a2, float& a3, float& a4, float& a5) {
+        float z0 = a0; float z1 = a1; float z2 = a2;
+        a0 = 0.25f * z0;
+        a1 = (float)( (1.0 / 6.0) * (-z0 - z1 - z2) );
+        a2 = (float)( (1.0 / 6.0) * (-z0 + z1 - z2) );
+        a3 = (float)( (1.0 / 24.0) * (z0 + 2.0*z1 + 4.0*z2) );
+        a4 = (float)( (1.0 / 24.0) * (z0 - 2.0*z1 + 4.0*z2) );
+        a5 = 1.0f * z2;
+      };
+      auto transform5x5_6 = [](float& a0, float& a1, float& a2, float& a3, float& a4, float& a5) {
+        float z0 = a0; float z1 = a1; float z2 = a2; float z3 = a3; float z4 = a4;
+        a0 = 0.25f * z0;
+        a1 = (float)( (1.0 / 6.0) * (-z0 - z1 - z2 - z3 - z4) );
+        a2 = (float)( (1.0 / 6.0) * (-z0 + z1 - z2 + z3 - z4) );
+        a3 = (float)( (1.0 / 24.0) * (z0 + 2.0*z1 + 4.0*z2 + 8.0*z3 + 16.0*z4) );
+        a4 = (float)( (1.0 / 24.0) * (z0 - 2.0*z1 + 4.0*z2 - 8.0*z3 + 16.0*z4) );
+        a5 = 1.0f * z4;
+      };
+
+      for(int oc = 0; oc < outChannels; oc++) {
+        for(int ic = 0; ic < inChannels; ic++) {
+          float tmp[maxTileYSize][maxTileXSize];
+          for(int subY = 0; subY < convYSize; subY++) {
+            for(int subX = 0; subX < convXSize; subX++) {
+              if(oc < outChannels && ic < inChannels)
+                tmp[subY][subX] = desc.weights[((oc * inChannels + ic) * convYSize + subY) * convXSize + subX];
+              else
+                tmp[subY][subX] = 0.0f;
+            }
+          }
+
+          if(convXSize == 3) {
+            for(int subY = 0; subY < convYSize; subY++)
+              transform3x3_6(tmp[subY][0], tmp[subY][1], tmp[subY][2], tmp[subY][3], tmp[subY][4], tmp[subY][5]);
+          }
+          else if(convXSize == 5) {
+            for(int subY = 0; subY < convYSize; subY++)
+              transform5x5_6(tmp[subY][0], tmp[subY][1], tmp[subY][2], tmp[subY][3], tmp[subY][4], tmp[subY][5]);
+          }
+
+          if(convYSize == 3) {
+            for(int subX = 0; subX < inTileXSize; subX++)
+              transform3x3_6(tmp[0][subX], tmp[1][subX], tmp[2][subX], tmp[3][subX], tmp[4][subX], tmp[5][subX]);
+          }
+          else if(convYSize == 5) {
+            for(int subX = 0; subX < inTileXSize; subX++)
+              transform5x5_6(tmp[0][subX], tmp[1][subX], tmp[2][subX], tmp[3][subX], tmp[4][subX], tmp[5][subX]);
+          }
+
+          for(int subY = 0; subY < inTileYSize; subY++) {
+            for(int subX = 0; subX < inTileXSize; subX++) {
+              transWeights[((subY*inTileXSize + subX)*inChannels + ic)*outChannels + oc] = tmp[subY][subX];
+            }
+          }
+        }
+      }
+
+      winogradKernel = TensorMap<const Tensor<const SCALAR, 3>>(
+        transWeights.data(), outChannels, inChannels, inTileXSize * inTileYSize);
+    }
+
+    else {
+      numTilesX = 0; //not used in this branch
+      numTilesY = 0; //not used in this branch
+      inTileXYSize = 0; //not used in this branch
+      outTileXYSize = 0; //not used in this branch
+
+      TENSOR4 kernel = TensorMap<const Tensor<const SCALAR, 4>>(desc.weights.data(), convXSize, convYSize, inChannels, outChannels);
+      imagePatchSize = convXSize * convYSize * inChannels;
+      Eigen::array<int, 4> dimensionPermutatation({3, 2, 0, 1});
+      Eigen::array<int, 2> newShape({outChannels, imagePatchSize});
+      imagePatchKernel = kernel.shuffle(dimensionPermutatation).reshape(newShape);
+    }
   }
 
-  void apply(CONSTTENSORMAP4* input, TENSORMAP4* output, bool accumulate) const {
+  size_t requiredConvWorkspaceElts(size_t maxBatchSize) const {
+    if((convXSize == 3 && convYSize == 3) || (convXSize == 5 && convYSize == 5)) {
+      constexpr int inTileXSize = 6;
+      constexpr int inTileYSize = 6;
+      int totalChannelsRounded = roundUpToMultiple(inChannels,32) + roundUpToMultiple(outChannels,32);
+      size_t sizeForTransforms = totalChannelsRounded * maxBatchSize * numTilesY * numTilesX * inTileXSize * inTileYSize;
+      size_t sizeForTileBufs = 2 * inTileXSize * inTileYSize * roundUpToMultiple(std::max(inChannels,outChannels),32);
+      return sizeForTransforms + sizeForTileBufs;
+    }
+    return 0;
+  }
+
+  void apply(ComputeHandleInternal* handle, CONSTTENSORMAP4* input, TENSORMAP4* output, float* convWorkspace, bool accumulate) const {
+    (void)handle;
     assert(output->dimension(0) == outChannels);
-    int i_c = input->dimension(0), i_w = input->dimension(1);
-    int i_h = input->dimension(2), i_n = input->dimension(3);
-    assert(i_c == k_ic);
-    Eigen::array<int, 2> as_col_vectors({vector_size, i_w * i_h * i_n});
-    Eigen::array<Eigen::IndexPair<int>, 1> as_matrix_product
-      = {Eigen::IndexPair<int> (1, 0)};
-    Eigen::array<int, 4> output_shape({k_oc, i_w, i_h, i_n});
-    auto cooked_input = input->extract_image_patches(k_w, k_h)
-      .reshape(as_col_vectors);
-    auto convolution = cooked_kernel.contract(cooked_input, as_matrix_product)
-      .reshape(output_shape);
-    if(accumulate)
-      *output += convolution;
-    else
-      *output = convolution;
+    assert(input->dimension(0) == inChannels);
+    assert(input->dimension(1) == nnXLen);
+    assert(input->dimension(2) == nnYLen);
+    const int batchSize = input->dimension(3);
+    const int xSize = nnXLen;
+    const int ySize = nnYLen;
+
+    if((convXSize == 3 && convYSize == 3) || (convXSize == 5 && convYSize == 5)) {
+      constexpr int inTileXSize = 6;
+      constexpr int inTileYSize = 6;
+      const int inTileXOffset = convXSize == 5 ? -2 : -1;
+      const int inTileYOffset = convYSize == 5 ? -2 : -1;
+      const int outTileXSize = convXSize == 5 ? 2 : 4;
+      const int outTileYSize = convYSize == 5 ? 2 : 4;
+
+      float* tile = convWorkspace;
+      float* tile2 = tile + inTileXSize * inTileYSize * roundUpToMultiple(std::max(inChannels,outChannels),32);
+      float* convWorkspaceIn = tile2 + inTileXSize * inTileYSize * roundUpToMultiple(std::max(inChannels,outChannels),32);
+      float* convWorkspaceOut = convWorkspaceIn + roundUpToMultiple(inChannels,32) * batchSize * numTilesY * numTilesX * inTileXSize * inTileYSize;
+      TENSORMAP3 transformedInput(convWorkspaceIn, inChannels, batchSize * numTilesY * numTilesX, inTileXSize * inTileYSize);
+      TENSORMAP3 transformedOutput(convWorkspaceOut, outChannels, batchSize * numTilesY * numTilesX, inTileXSize * inTileYSize);
+      for(int n = 0; n < batchSize; n++) {
+        for(int yTile = 0; yTile < numTilesY; yTile++) {
+          for(int xTile = 0; xTile < numTilesX; xTile++) {
+            for(int dy = 0; dy < inTileYSize; dy++) {
+              for(int dx = 0; dx < inTileXSize; dx++) {
+                int x = xTile*outTileXSize+dx+inTileXOffset;
+                int y = yTile*outTileYSize+dy+inTileYOffset;
+                int subTileIdx = dy * inTileXSize + dx;
+                if(x < 0 || y < 0 || x >= xSize || y >= ySize) {
+                  std::fill(tile + subTileIdx * inChannels, tile + (subTileIdx+1) * inChannels, 0.0f);
+                }
+                else {
+                  for(int ic = 0; ic < inChannels; ic++) {
+                    float z = (*input)(ic,x,y,n);
+                    tile[subTileIdx * inChannels + ic] = z;
+                  }
+                }
+              }
+            }
+
+            for(int subY = 0; subY < inTileYSize; subY++) {
+              float* __restrict t0 = &tile[(subY*inTileXSize+0)*inChannels];
+              float* __restrict t1 = &tile[(subY*inTileXSize+1)*inChannels];
+              float* __restrict t2 = &tile[(subY*inTileXSize+2)*inChannels];
+              float* __restrict t3 = &tile[(subY*inTileXSize+3)*inChannels];
+              float* __restrict t4 = &tile[(subY*inTileXSize+4)*inChannels];
+              float* __restrict t5 = &tile[(subY*inTileXSize+5)*inChannels];
+              for(int ic = 0; ic < inChannels; ic++) {
+                float z0 = t0[ic];
+                float z1 = t1[ic];
+                float z2 = t2[ic];
+                float z3 = t3[ic];
+                float z4 = t4[ic];
+                float z5 = t5[ic];
+                t0[ic] = 4.0f*z0 - 5.0f*z2 + z4;
+                t1[ic] = - 4.0f*z1 - 4.0f*z2 + z3 + z4;
+                t2[ic] =   4.0f*z1 - 4.0f*z2 - z3 + z4;
+                t3[ic] = - 2.0f*z1 - z2 + 2.0f*z3 + z4;
+                t4[ic] =   2.0f*z1 - z2 - 2.0f*z3 + z4;
+                t5[ic] = 4.0f*z1 - 5.0f*z3 + z5;
+              }
+            }
+            for(int subX = 0; subX < inTileXSize; subX++) {
+              float* __restrict t0 = &tile[(0*inTileXSize+subX)*inChannels];
+              float* __restrict t1 = &tile[(1*inTileXSize+subX)*inChannels];
+              float* __restrict t2 = &tile[(2*inTileXSize+subX)*inChannels];
+              float* __restrict t3 = &tile[(3*inTileXSize+subX)*inChannels];
+              float* __restrict t4 = &tile[(4*inTileXSize+subX)*inChannels];
+              float* __restrict t5 = &tile[(5*inTileXSize+subX)*inChannels];
+              for(int ic = 0; ic < inChannels; ic++) {
+                float z0 = t0[ic];
+                float z1 = t1[ic];
+                float z2 = t2[ic];
+                float z3 = t3[ic];
+                float z4 = t4[ic];
+                float z5 = t5[ic];
+                t0[ic] = 4.0f*z0 - 5.0f*z2 + z4;
+                t1[ic] = - 4.0f*z1 - 4.0f*z2 + z3 + z4;
+                t2[ic] =   4.0f*z1 - 4.0f*z2 - z3 + z4;
+                t3[ic] = - 2.0f*z1 - z2 + 2.0f*z3 + z4;
+                t4[ic] =   2.0f*z1 - z2 - 2.0f*z3 + z4;
+                t5[ic] = 4.0f*z1 - 5.0f*z3 + z5;
+              }
+            }
+            int batchTileXTileY = n * numTilesY * numTilesX + yTile * numTilesX + xTile;
+            for(int dy = 0; dy < inTileYSize; dy++) {
+              for(int dx = 0; dx < inTileXSize; dx++) {
+                for(int ic = 0; ic < inChannels; ic++) {
+                  int subTileIdx = dy * inTileXSize + dx;
+                  transformedInput(ic, batchTileXTileY, subTileIdx) = tile[subTileIdx*inChannels+ic];
+                }
+              }
+            }
+          }
+        }
+      }
+
+      //TODO someday: Does eigen have a fast batched matrix multiply?
+      //Here we just manually iterate over the 36 matrices that need to get multiplied.
+      //Also, if eigen were to support *interleaved* matrices (viewing it as a matrix whose element is
+      //a vector of length 36 instead of a float), that might allow for improved transform/untransform implementations.
+      for(int dy = 0; dy < inTileYSize; dy++) {
+        for(int dx = 0; dx < inTileXSize; dx++) {
+          int subTileIdx = dy * inTileXSize + dx;
+          auto transformedInputMap = Eigen::Map<Eigen::Matrix<SCALAR,Eigen::Dynamic,Eigen::Dynamic,Eigen::ColMajor>>(
+            (float*)transformedInput.data() + subTileIdx * batchSize * numTilesY * numTilesX * inChannels,
+            inChannels,
+            batchSize * numTilesY * numTilesX
+          );
+          auto winogradKernelMap = Eigen::Map<Eigen::Matrix<SCALAR,Eigen::Dynamic,Eigen::Dynamic,Eigen::ColMajor>>(
+            (float*)winogradKernel.data() + subTileIdx * outChannels * inChannels,
+            outChannels,
+            inChannels
+          );
+          auto transformedOutputMap = Eigen::Map<Eigen::Matrix<SCALAR,Eigen::Dynamic,Eigen::Dynamic,Eigen::ColMajor>>(
+            (float*)transformedOutput.data() + subTileIdx * batchSize * numTilesY * numTilesX * outChannels,
+            outChannels,
+            batchSize * numTilesY * numTilesX
+          );
+          transformedOutputMap = winogradKernelMap * transformedInputMap;
+        }
+      }
+
+      for(int n = 0; n < batchSize; n++) {
+        for(int yTile = 0; yTile < numTilesY; yTile++) {
+          for(int xTile = 0; xTile < numTilesX; xTile++) {
+            int batchTileXTileY = n * numTilesY * numTilesX + yTile * numTilesX + xTile;
+            for(int dy = 0; dy < inTileYSize; dy++) {
+              for(int dx = 0; dx < inTileXSize; dx++) {
+                int subTileIdx = dy * inTileXSize + dx;
+                for(int oc = 0; oc < outChannels; oc++) {
+                  tile[subTileIdx*outChannels+oc] = transformedOutput(oc, batchTileXTileY, subTileIdx);
+                }
+              }
+            }
+
+            if(convXSize == 5 && convYSize == 5) {
+              for(int subY = 0; subY < inTileYSize; subY++) {
+                float* __restrict t0 = &tile[(subY*inTileXSize+0)*outChannels];
+                float* __restrict t1 = &tile[(subY*inTileXSize+1)*outChannels];
+                float* __restrict t2 = &tile[(subY*inTileXSize+2)*outChannels];
+                float* __restrict t3 = &tile[(subY*inTileXSize+3)*outChannels];
+                float* __restrict t4 = &tile[(subY*inTileXSize+4)*outChannels];
+                float* __restrict t5 = &tile[(subY*inTileXSize+5)*outChannels];
+                for(int oc = 0; oc < outChannels; oc++) {
+                  float z0 = t0[oc];
+                  float z1 = t1[oc];
+                  float z2 = t2[oc];
+                  float z3 = t3[oc];
+                  float z4 = t4[oc];
+                  float z5 = t5[oc];
+                  t0[oc] = z0 + z1 + z2 + z3 + z4;
+                  t1[oc] = (z1-z2) + 2.0f*(z3-z4) + z5;
+                }
+              }
+              for(int subX = 0; subX < outTileXSize; subX++) {
+                float* __restrict t0 = &tile[(0*inTileXSize+subX)*outChannels];
+                float* __restrict t1 = &tile[(1*inTileXSize+subX)*outChannels];
+                float* __restrict t2 = &tile[(2*inTileXSize+subX)*outChannels];
+                float* __restrict t3 = &tile[(3*inTileXSize+subX)*outChannels];
+                float* __restrict t4 = &tile[(4*inTileXSize+subX)*outChannels];
+                float* __restrict t5 = &tile[(5*inTileXSize+subX)*outChannels];
+                for(int oc = 0; oc < outChannels; oc++) {
+                  float z0 = t0[oc];
+                  float z1 = t1[oc];
+                  float z2 = t2[oc];
+                  float z3 = t3[oc];
+                  float z4 = t4[oc];
+                  float z5 = t5[oc];
+                  t0[oc] = z0 + z1 + z2 + z3 + z4;
+                  t1[oc] = (z1-z2) + 2.0f*(z3-z4) + z5;
+                }
+              }
+            }
+            else {
+              for(int subY = 0; subY < inTileYSize; subY++) {
+                float* __restrict t0 = &tile[(subY*inTileXSize+0)*outChannels];
+                float* __restrict t1 = &tile[(subY*inTileXSize+1)*outChannels];
+                float* __restrict t2 = &tile[(subY*inTileXSize+2)*outChannels];
+                float* __restrict t3 = &tile[(subY*inTileXSize+3)*outChannels];
+                float* __restrict t4 = &tile[(subY*inTileXSize+4)*outChannels];
+                float* __restrict t5 = &tile[(subY*inTileXSize+5)*outChannels];
+                for(int oc = 0; oc < outChannels; oc++) {
+                  float z0 = t0[oc];
+                  float z1 = t1[oc];
+                  float z2 = t2[oc];
+                  float z3 = t3[oc];
+                  float z4 = t4[oc];
+                  float z5 = t5[oc];
+                  t0[oc] = z0 + z1 + z2 + z3 + z4;
+                  t1[oc] = (z1-z2) + 2.0f*(z3-z4);
+                  t2[oc] = (z1+z2) + 4.0f*(z3+z4);
+                  t3[oc] = (z1-z2) + 8.0f*(z3-z4) + z5;
+                }
+              }
+              for(int subX = 0; subX < outTileXSize; subX++) {
+                float* __restrict t0 = &tile[(0*inTileXSize+subX)*outChannels];
+                float* __restrict t1 = &tile[(1*inTileXSize+subX)*outChannels];
+                float* __restrict t2 = &tile[(2*inTileXSize+subX)*outChannels];
+                float* __restrict t3 = &tile[(3*inTileXSize+subX)*outChannels];
+                float* __restrict t4 = &tile[(4*inTileXSize+subX)*outChannels];
+                float* __restrict t5 = &tile[(5*inTileXSize+subX)*outChannels];
+                for(int oc = 0; oc < outChannels; oc++) {
+                  float z0 = t0[oc];
+                  float z1 = t1[oc];
+                  float z2 = t2[oc];
+                  float z3 = t3[oc];
+                  float z4 = t4[oc];
+                  float z5 = t5[oc];
+                  t0[oc] = z0 + z1 + z2 + z3 + z4;
+                  t1[oc] = (z1-z2) + 2.0f*(z3-z4);
+                  t2[oc] = (z1+z2) + 4.0f*(z3+z4);
+                  t3[oc] = (z1-z2) + 8.0f*(z3-z4) + z5;
+                }
+              }
+            }
+
+            if(accumulate) {
+              for(int dy = 0; dy < outTileYSize; dy++) {
+                for(int dx = 0; dx < outTileXSize; dx++) {
+                  int x = xTile*outTileXSize+dx;
+                  int y = yTile*outTileYSize+dy;
+                  if(!(x < 0 || y < 0 || x >= xSize || y >= ySize)) {
+                    int subTileIdx = dy * inTileXSize + dx;
+                    for(int oc = 0; oc < outChannels; oc++) {
+                      (*output)(oc,x,y,n) += tile[subTileIdx*outChannels+oc];
+                    }
+                  }
+                }
+              }
+            }
+            else {
+              for(int dy = 0; dy < outTileYSize; dy++) {
+                for(int dx = 0; dx < outTileXSize; dx++) {
+                  int x = xTile*outTileXSize+dx;
+                  int y = yTile*outTileYSize+dy;
+                  if(!(x < 0 || y < 0 || x >= xSize || y >= ySize)) {
+                    int subTileIdx = dy * inTileXSize + dx;
+                    for(int oc = 0; oc < outChannels; oc++) {
+                      (*output)(oc,x,y,n) = tile[subTileIdx*outChannels+oc];
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+    else {
+      Eigen::array<int, 2> imagePatchColVectorShape({imagePatchSize, xSize*ySize*batchSize});
+      Eigen::array<Eigen::IndexPair<int>, 1> contractionDims = {Eigen::IndexPair<int>(1, 0)};
+      Eigen::array<int, 4> outputShape({outChannels,xSize,ySize,batchSize});
+      auto imagePatches = input->extract_image_patches(convXSize,convYSize).reshape(imagePatchColVectorShape);
+      auto convolution = imagePatchKernel.contract(imagePatches, contractionDims).reshape(outputShape);
+      if(accumulate)
+        *output += convolution;
+      else
+        *output = convolution;
+    }
   }
 };
 
@@ -407,6 +761,7 @@ struct ResidualBlockIntf {
   virtual ~ResidualBlockIntf(){}
 
   virtual void apply(
+    ComputeHandleInternal* handle,
     TENSORMAP4* trunk,
     TENSORMAP4* trunkScratch,
     TENSORMAP4* regularOut,
@@ -418,8 +773,11 @@ struct ResidualBlockIntf {
     TENSORMAP2* gpoolConcat,
     TENSORMAP2* gpoolBias,
     CONSTTENSORMAP3* mask,
-    const float* maskSum
+    const float* maskSum,
+    float* convWorkspace
   ) const = 0;
+
+  virtual size_t requiredConvWorkspaceElts(size_t maxBatchSize) const = 0;
 };
 
 struct ResidualBlock final : public ResidualBlockIntf {
@@ -435,14 +793,22 @@ struct ResidualBlock final : public ResidualBlockIntf {
 
   ~ResidualBlock(){}
 
-  ResidualBlock(const ResidualBlockDesc& desc)
+  ResidualBlock(const ResidualBlockDesc& desc, int nnX, int nnY)
     : name(desc.name),
       preBN(desc.preBN),
-      regularConv(desc.regularConv),
+      regularConv(desc.regularConv,nnX,nnY),
       midBN(desc.midBN),
-      finalConv(desc.finalConv) {}
+      finalConv(desc.finalConv,nnX,nnY) {}
+
+  size_t requiredConvWorkspaceElts(size_t maxBatchSize) const {
+    return std::max(
+      regularConv.requiredConvWorkspaceElts(maxBatchSize),
+      finalConv.requiredConvWorkspaceElts(maxBatchSize)
+    );
+  }
 
   void apply(
+    ComputeHandleInternal* handle,
     TENSORMAP4* trunk,
     TENSORMAP4* trunkScratch,
     TENSORMAP4* regularOut,
@@ -454,7 +820,8 @@ struct ResidualBlock final : public ResidualBlockIntf {
     TENSORMAP2* gpoolConcat,
     TENSORMAP2* gpoolBias,
     CONSTTENSORMAP3* mask,
-    const float* maskSum
+    const float* maskSum,
+    float* convWorkspace
   ) const override {
     (void)regularOut;
     (void)regularScratch;
@@ -465,35 +832,11 @@ struct ResidualBlock final : public ResidualBlockIntf {
     (void)maskSum;
     const bool applyBNRelu = true;
     preBN.apply(applyBNRelu, trunk, trunkScratch, mask);
-    regularConv.apply(trunkScratch, midIn, false);
+    regularConv.apply(handle, trunkScratch, midIn, convWorkspace, false);
     midBN.apply(applyBNRelu, midIn, midScratch, mask);
-    finalConv.apply(midScratch, trunk, true);
+    finalConv.apply(handle, midScratch, trunk, convWorkspace, true);
   }
 };
-
-// // Given two tensors with shapes inA: [n, h, w, cA] and inB: [n, h, w, cB]
-// // Copy them into a single tensor out: [n, h, w, cA + cB]
-// TENSOR4 concatTensors(CONSTTENSOR4& a, CONSTTENSOR4& b) {
-//   assert(a->dimension(1) == b->dimension(1) && a->dimension(2) == b->dimension(2) && a->dimension(3) == b->dimension(3));
-//   TENSOR4 x = TENSOR4(/* C */ a->dimension(0) + b->dimension(0),
-//                                           /* W */ a->dimension(1),
-//                                           /* H */ a->dimension(2),
-//                                           /* N */ a->dimension(3));
-//   for (int n = 0; n < a->dimension(3); n++) {
-//     for (int h = 0; h < a->dimension(2); h++) {
-//       for (int w = 0; w < a->dimension(1); w++) {
-//         int c = 0;
-//         for (int ca = 0; a->dimension(0); ca++, c++) {
-//           x(c,w,h,n) = a(ca,w,h,n);
-//         }
-//         for (int cb = 0; b->dimension(0); cb++, c++) {
-//           x(c,w,h,n) = b(cb,w,h,n);
-//         }
-//       }
-//     }
-//   }
-//   return x;
-// }
 
 
 struct GlobalPoolingResidualBlock final : public ResidualBlockIntf {
@@ -515,20 +858,29 @@ struct GlobalPoolingResidualBlock final : public ResidualBlockIntf {
 
   ~GlobalPoolingResidualBlock(){}
 
-  GlobalPoolingResidualBlock(const GlobalPoolingResidualBlockDesc& desc)
+  GlobalPoolingResidualBlock(const GlobalPoolingResidualBlockDesc& desc, int nnX, int nnY)
     : name(desc.name),
       preBN(desc.preBN),
       preActivation(desc.preActivation),
-      regularConv(desc.regularConv),
-      gpoolConv(desc.gpoolConv),
+      regularConv(desc.regularConv,nnX,nnY),
+      gpoolConv(desc.gpoolConv,nnX,nnY),
       gpoolBN(desc.gpoolBN),
       gpoolActivation(desc.gpoolActivation),
       gpoolToBiasMul(desc.gpoolToBiasMul),
       midBN(desc.midBN),
       midActivation(desc.midActivation),
-      finalConv(desc.finalConv) {}
+      finalConv(desc.finalConv,nnX,nnY) {}
+
+  size_t requiredConvWorkspaceElts(size_t maxBatchSize) const {
+    size_t maxElts = 0;
+    maxElts = std::max(maxElts,regularConv.requiredConvWorkspaceElts(maxBatchSize));
+    maxElts = std::max(maxElts,gpoolConv.requiredConvWorkspaceElts(maxBatchSize));
+    maxElts = std::max(maxElts,finalConv.requiredConvWorkspaceElts(maxBatchSize));
+    return maxElts;
+  }
 
   void apply(
+    ComputeHandleInternal* handle,
     TENSORMAP4* trunk,
     TENSORMAP4* trunkScratch,
     TENSORMAP4* regularOut,
@@ -540,7 +892,8 @@ struct GlobalPoolingResidualBlock final : public ResidualBlockIntf {
     TENSORMAP2* gpoolConcat,
     TENSORMAP2* gpoolBias,
     CONSTTENSORMAP3* mask,
-    const float* maskSum
+    const float* maskSum,
+    float* convWorkspace
   ) const override {
     (void)midIn;
     (void)midScratch;
@@ -549,9 +902,9 @@ struct GlobalPoolingResidualBlock final : public ResidualBlockIntf {
     DTENSOR("mask", mask);
     preBN.apply(applyBNRelu, trunk, trunkScratch, mask);
     DTENSOR("trunkScratch", trunkScratch);
-    regularConv.apply(trunkScratch, regularOut, false);
+    regularConv.apply(handle, trunkScratch, regularOut, convWorkspace, false);
     DTENSOR("regularOut", regularOut);
-    gpoolConv.apply(trunkScratch, gpoolOut, false);
+    gpoolConv.apply(handle, trunkScratch, gpoolOut, convWorkspace, false);
     DTENSOR("gpoolOut", gpoolOut);
     gpoolBN.apply(applyBNRelu, gpoolOut, gpoolOut2, mask);
     DTENSOR("gpoolOut2", gpoolOut2);
@@ -559,7 +912,7 @@ struct GlobalPoolingResidualBlock final : public ResidualBlockIntf {
     gpoolToBiasMul.apply(gpoolConcat, gpoolBias);
     addNCBiasInplace(regularOut, gpoolBias);
     midBN.apply(applyBNRelu, regularOut, regularScratch, mask);
-    finalConv.apply(regularScratch, trunk, true);
+    finalConv.apply(handle, regularScratch, trunk, convWorkspace, true);
     DSHAPE("trunk", trunk);
     DSHAPE("trunkScratch", trunkScratch);
     DSHAPE("regularOut", regularOut);
@@ -586,11 +939,11 @@ struct Trunk {
   Trunk(const Trunk&) = delete;
   Trunk& operator=(const Trunk&) = delete;
 
-  Trunk(const TrunkDesc& desc)
+  Trunk(const TrunkDesc& desc, int nnX, int nnY)
     : name(desc.name),
       version(desc.version),
       numBlocks(desc.numBlocks),
-      initialConv(desc.initialConv),
+      initialConv(desc.initialConv,nnX,nnY),
       initialMatMul(desc.initialMatMul),
       trunkTipBN(desc.trunkTipBN),
       trunkTipActivation(desc.trunkTipActivation)
@@ -598,7 +951,7 @@ struct Trunk {
     for (int i = 0; i < numBlocks; ++i) {
       if (desc.blocks[i].first == ORDINARY_BLOCK_KIND) {
         ResidualBlockDesc* blockDesc = (ResidualBlockDesc*)desc.blocks[i].second;
-        ResidualBlockIntf* block = new ResidualBlock(*blockDesc);
+        ResidualBlockIntf* block = new ResidualBlock(*blockDesc,nnX,nnY);
         blocks.push_back(make_pair(ORDINARY_BLOCK_KIND, block));
       }
       else if (desc.blocks[i].first == DILATED_BLOCK_KIND) {
@@ -606,7 +959,7 @@ struct Trunk {
       }
       else if (desc.blocks[i].first == GLOBAL_POOLING_BLOCK_KIND) {
         GlobalPoolingResidualBlockDesc* blockDesc = (GlobalPoolingResidualBlockDesc*)desc.blocks[i].second;
-        GlobalPoolingResidualBlock* block = new GlobalPoolingResidualBlock(*blockDesc);
+        GlobalPoolingResidualBlock* block = new GlobalPoolingResidualBlock(*blockDesc,nnX,nnY);
         blocks.push_back(make_pair(GLOBAL_POOLING_BLOCK_KIND, block));
       }
       else {
@@ -621,7 +974,16 @@ struct Trunk {
     }
   }
 
+  size_t requiredConvWorkspaceElts(size_t maxBatchSize) const {
+    size_t maxElts = initialConv.requiredConvWorkspaceElts(maxBatchSize);
+    for(int i = 0; i<blocks.size(); i++) {
+      maxElts = std::max(maxElts,blocks[i].second->requiredConvWorkspaceElts(maxBatchSize));
+    }
+    return maxElts;
+  }
+
   void apply(
+    ComputeHandleInternal* handle,
     CONSTTENSORMAP4* input,
     CONSTTENSORMAP2* inputGlobal,
     TENSORMAP2* inputMatMulOut,
@@ -636,10 +998,11 @@ struct Trunk {
     TENSORMAP2* gpoolConcat,
     TENSORMAP2* gpoolBias,
     CONSTTENSORMAP3* mask,
-    const float* maskSum
+    const float* maskSum,
+    float* convWorkspace
   ) const {
 
-    initialConv.apply(input, trunkScratch, false);
+    initialConv.apply(handle, input, trunkScratch, convWorkspace, false);
     initialMatMul.apply(inputGlobal, inputMatMulOut);
     addNCBiasInplace(trunkScratch, inputMatMulOut);
 
@@ -647,6 +1010,7 @@ struct Trunk {
     // Flip trunkBuf and trunkScratchBuf so that the result gets accumulated in trunkScratchBuf
     for (auto block : blocks) {
       block.second->apply(
+        handle,
         trunkScratch,
         trunk,
         regularOut,
@@ -658,7 +1022,8 @@ struct Trunk {
         gpoolConcat,
         gpoolBias,
         mask,
-        maskSum
+        maskSum,
+        convWorkspace
       );
     }
 
@@ -686,20 +1051,29 @@ struct PolicyHead {
   PolicyHead(const PolicyHead&) = delete;
   PolicyHead& operator=(const PolicyHead&) = delete;
 
-  PolicyHead(const PolicyHeadDesc& desc)
+  PolicyHead(const PolicyHeadDesc& desc, int nnX, int nnY)
     : name(desc.name),
       version(desc.version),
-      p1Conv(desc.p1Conv),
-      g1Conv(desc.g1Conv),
+      p1Conv(desc.p1Conv,nnX,nnY),
+      g1Conv(desc.g1Conv,nnX,nnY),
       g1BN(desc.g1BN),
       g1Activation(desc.g1Activation),
       gpoolToBiasMul(desc.gpoolToBiasMul),
       p1BN(desc.p1BN),
       p1Activation(desc.p1Activation),
-      p2Conv(desc.p2Conv),
+      p2Conv(desc.p2Conv,nnX,nnY),
       gpoolToPassMul(desc.gpoolToPassMul) {}
 
+  size_t requiredConvWorkspaceElts(size_t maxBatchSize) const {
+    size_t maxElts = 0;
+    maxElts = std::max(maxElts,p1Conv.requiredConvWorkspaceElts(maxBatchSize));
+    maxElts = std::max(maxElts,g1Conv.requiredConvWorkspaceElts(maxBatchSize));
+    maxElts = std::max(maxElts,p2Conv.requiredConvWorkspaceElts(maxBatchSize));
+    return maxElts;
+  }
+
   void apply(
+    ComputeHandleInternal* handle,
     CONSTTENSORMAP4* trunk,
     TENSORMAP4* p1Out,
     TENSORMAP4* p1Out2,
@@ -710,17 +1084,18 @@ struct PolicyHead {
     TENSORMAP2* policyPass,
     TENSORMAP4* policy,
     CONSTTENSORMAP3* mask,
-    const float* maskSum
+    const float* maskSum,
+    float* convWorkspace
   ) const {
     const bool applyBNRelu = true;
-    p1Conv.apply(trunk, p1Out, false);
-    g1Conv.apply(trunk, g1Out, false);
+    p1Conv.apply(handle, trunk, p1Out, convWorkspace, false);
+    g1Conv.apply(handle, trunk, g1Out, convWorkspace, false);
     g1BN.apply(applyBNRelu, g1Out, g1Out2, mask);
     poolRowsGPool(g1Out2, g1Concat, maskSum);
     gpoolToBiasMul.apply(g1Concat, g1Bias);
     addNCBiasInplace(p1Out, g1Bias);
     p1BN.apply(true, p1Out, p1Out2, mask);
-    p2Conv.apply(p1Out2, policy, false);
+    p2Conv.apply(handle, p1Out2, policy, convWorkspace, false);
     gpoolToPassMul.apply(g1Concat, policyPass);
   }
 };
@@ -745,10 +1120,10 @@ struct ValueHead {
   ValueHead(const ValueHead&) = delete;
   ValueHead& operator=(const ValueHead&) = delete;
 
-  ValueHead(const ValueHeadDesc& desc)
+  ValueHead(const ValueHeadDesc& desc, int nnX, int nnY)
     : name(desc.name),
       version(desc.version),
-      v1Conv(desc.v1Conv),
+      v1Conv(desc.v1Conv,nnX,nnY),
       v1BN(desc.v1BN),
       v1Activation(desc.v1Activation),
       v2Mul(desc.v2Mul),
@@ -758,9 +1133,17 @@ struct ValueHead {
       v3Bias(desc.v3Bias),
       sv3Mul(desc.sv3Mul),
       sv3Bias(desc.sv3Bias),
-      vOwnershipConv(desc.vOwnershipConv) {}
+      vOwnershipConv(desc.vOwnershipConv,nnX,nnY) {}
+
+  size_t requiredConvWorkspaceElts(size_t maxBatchSize) const {
+    size_t maxElts = 0;
+    maxElts = std::max(maxElts,v1Conv.requiredConvWorkspaceElts(maxBatchSize));
+    maxElts = std::max(maxElts,vOwnershipConv.requiredConvWorkspaceElts(maxBatchSize));
+    return maxElts;
+  }
 
   void apply(
+    ComputeHandleInternal* handle,
     CONSTTENSORMAP4* trunk,
     TENSORMAP4* v1Out,
     TENSORMAP4* v1Out2,
@@ -770,10 +1153,11 @@ struct ValueHead {
     TENSORMAP2* scoreValue,
     TENSORMAP4* ownership,
     CONSTTENSORMAP3* mask,
-    const float* maskSum
+    const float* maskSum,
+    float* convWorkspace
   ) const {
     bool applyBNRelu = true;
-    v1Conv.apply(trunk, v1Out, false);
+    v1Conv.apply(handle, trunk, v1Out, convWorkspace, false);
     v1BN.apply(applyBNRelu, v1Out, v1Out2, mask);
     poolRowsValueHead(v1Out2, v1Mean, maskSum);
     v2Mul.apply(v1Mean, v2Out);
@@ -785,7 +1169,7 @@ struct ValueHead {
     sv3Mul.apply(v2Out, scoreValue);
     sv3Bias.apply(scoreValue);
 
-    vOwnershipConv.apply(v1Out2, ownership, false);
+    vOwnershipConv.apply(handle, v1Out2, ownership, convWorkspace, false);
   }
 };
 
@@ -800,6 +1184,7 @@ struct Model {
   int numValueChannels;
   int numScoreValueChannels;
   int numOwnershipChannels;
+  int maxBatchSize;
 
   Trunk trunk;
   PolicyHead policyHead;
@@ -809,17 +1194,27 @@ struct Model {
   Model(const Model&) = delete;
   Model& operator=(const Model&) = delete;
 
-  Model(const ModelDesc& desc)
+  Model(const ModelDesc& desc, int nnX, int nnY, int maxBatchSz)
     : name(desc.name), version(desc.version), numInputChannels(desc.numInputChannels),
       numInputGlobalChannels(desc.numInputGlobalChannels),
       numValueChannels(desc.numValueChannels),
       numScoreValueChannels(desc.numScoreValueChannels),
       numOwnershipChannels(desc.numOwnershipChannels),
-      trunk(desc.trunk),
-      policyHead(desc.policyHead),
-      valueHead(desc.valueHead) {}
+      maxBatchSize(maxBatchSz),
+      trunk(desc.trunk,nnX,nnY),
+      policyHead(desc.policyHead,nnX,nnY),
+      valueHead(desc.valueHead,nnX,nnY) {}
+
+  size_t requiredConvWorkspaceElts() const {
+    size_t maxElts = 0;
+    maxElts = std::max(maxElts,trunk.requiredConvWorkspaceElts(maxBatchSize));
+    maxElts = std::max(maxElts,policyHead.requiredConvWorkspaceElts(maxBatchSize));
+    maxElts = std::max(maxElts,valueHead.requiredConvWorkspaceElts(maxBatchSize));
+    return maxElts;
+  }
 
   void apply(
+    ComputeHandleInternal* handle,
     CONSTTENSORMAP4* input,
     CONSTTENSORMAP2* inputGlobal,
     TENSORMAP2* inputMatMulOut,
@@ -852,12 +1247,14 @@ struct Model {
     TENSORMAP4* ownership,
 
     TENSORMAP3* mask,
-    float* maskSum
+    float* maskSum,
+    float* convWorkspace
   ) const {
     *mask = input->chip(0,0);
     computeMaskSum(mask,maskSum);
 
     trunk.apply(
+      handle,
       input,
       inputGlobal,
       inputMatMulOut,
@@ -872,9 +1269,11 @@ struct Model {
       gpoolConcat,
       gpoolBias,
       mask,
-      maskSum
+      maskSum,
+      convWorkspace
     );
     policyHead.apply(
+      handle,
       trunkBuf,
       p1Out,
       p1Out2,
@@ -885,9 +1284,11 @@ struct Model {
       policyPass,
       policy,
       mask,
-      maskSum
+      maskSum,
+      convWorkspace
     );
     valueHead.apply(
+      handle,
       trunkBuf,
       v1Out,
       v1Out2,
@@ -897,7 +1298,8 @@ struct Model {
       scoreValue,
       ownership,
       mask,
-      maskSum
+      maskSum,
+      convWorkspace
     );
   }
 };
@@ -936,9 +1338,11 @@ struct Buffers {
 
   TENSOR3 mask;
   vector<float> maskSum;
+  vector<float> convWorkspace;
 
   Buffers(
     const ModelDesc& desc,
+    const Model& m,
     int maxBatchSize,
     int nnXLen,
     int nnYLen
@@ -973,7 +1377,8 @@ struct Buffers {
     ownership(desc.valueHead.vOwnershipConv.outChannels, nnXLen, nnYLen, maxBatchSize),
 
     mask(nnXLen, nnYLen, maxBatchSize),
-    maskSum(maxBatchSize)
+    maskSum(maxBatchSize),
+    convWorkspace(m.requiredConvWorkspaceElts())
   {}
 };
 
@@ -1031,27 +1436,6 @@ void NeuralNet::freeInputBuffers(InputBuffers* inputBuffers) {
   delete inputBuffers;
 }
 
-// float* NeuralNet::getBatchEltSpatialInplace(InputBuffers* inputBuffers, int nIdx) {
-//   assert(nIdx < inputBuffers->maxBatchSize);
-//   return inputBuffers->spatialInput.data() + (inputBuffers->singleInputElts * nIdx);
-// }
-
-// float* NeuralNet::getBatchEltGlobalInplace(InputBuffers* inputBuffers, int rowIdx) {
-//   assert(rowIdx < inputBuffers->maxBatchSize);
-//   return inputBuffers->globalInput.data() + (inputBuffers->singleInputGlobalElts * rowIdx);
-// }
-
-// int NeuralNet::getBatchEltSpatialLen(const InputBuffers* inputBuffers) {
-//   return inputBuffers->singleInputElts;
-// }
-// int NeuralNet::getBatchEltGlobalLen(const InputBuffers* inputBuffers) {
-//   return inputBuffers->singleInputGlobalElts;
-// }
-
-// bool* NeuralNet::getSymmetriesInplace(InputBuffers* inputBuffers) {
-//   return inputBuffers->symmetriesBuffer;
-// }
-
 
 // NeuralNet -----------------------------------------------------------------------------------------------------------
 
@@ -1068,7 +1452,8 @@ struct ComputeHandle {
   int maxBatchSize;
   bool inputsUseNHWC;
   Model model;
-  Buffers buffers;
+  Buffers* buffers;
+  ComputeHandleInternal handleInternal;
 
   ComputeHandle() = delete;
   ComputeHandle(const ComputeHandle&) = delete;
@@ -1078,9 +1463,15 @@ struct ComputeHandle {
     : context(ctx),
       maxBatchSize(maxBSize),
       inputsUseNHWC(iNHWC),
-      model(loadedModel.modelDesc),
-      buffers(loadedModel.modelDesc,maxBSize,ctx->nnXLen,ctx->nnYLen)
-  {}
+      model(loadedModel.modelDesc,context->nnXLen,context->nnYLen,maxBSize),
+      handleInternal()
+  {
+    buffers = new Buffers(loadedModel.modelDesc,model,maxBSize,ctx->nnXLen,ctx->nnYLen);
+  }
+
+  ~ComputeHandle() {
+    delete buffers;
+  }
 };
 
 ComputeHandle* NeuralNet::createComputeHandle(
@@ -1090,11 +1481,12 @@ ComputeHandle* NeuralNet::createComputeHandle(
   int maxBatchSize,
   bool requireExactNNLen,
   bool inputsUseNHWC,
-  int gpuIdxForThisThread
+  int gpuIdxForThisThread,
+  int serverThreadIdx
 ) {
   if(logger != NULL) {
-    logger->write("Eigen (CPU) backend: Model version " + Global::intToString(loadedModel->modelDesc.version));
-    logger->write("Eigen (CPU) backend: Model name: " + loadedModel->modelDesc.name);
+    logger->write("Eigen (CPU) backend thread " + Global::intToString(serverThreadIdx) + ": Model version " + Global::intToString(loadedModel->modelDesc.version));
+    logger->write("Eigen (CPU) backend thread " + Global::intToString(serverThreadIdx) + ": Model name: " + loadedModel->modelDesc.name);
   }
 
   (void)requireExactNNLen; //We don't bother with mask optimizations if we know exact sizes right now.
@@ -1140,7 +1532,7 @@ void NeuralNet::getOutput(
     SymmetryHelpers::copyInputsWithSymmetry(rowSpatial, rowSpatialInput, 1, nnYLen, nnXLen, numSpatialFeatures, computeHandle->inputsUseNHWC, symmetry);
   }
 
-  Buffers& buffers = computeHandle->buffers;
+  Buffers& buffers = *(computeHandle->buffers);
 
   CONSTTENSORMAP4 input(inputBuffers->spatialInput.data(), numSpatialFeatures, nnXLen, nnYLen, batchSize);
   CONSTTENSORMAP2 inputGlobal(inputBuffers->globalInput.data(), numGlobalFeatures, batchSize);
@@ -1177,10 +1569,11 @@ void NeuralNet::getOutput(
   MAP4(ownership);
   MAP3(mask);
   vector<float>& maskSum = buffers.maskSum;
-
   computeMaskSum(&mask,maskSum.data());
+  vector<float>& convWorkspace = buffers.convWorkspace;
 
   computeHandle->model.apply(
+    &computeHandle->handleInternal,
     &input,
     &inputGlobal,
     &inputMatMulOut,
@@ -1210,7 +1603,8 @@ void NeuralNet::getOutput(
     &scoreValue,
     &ownership,
     &mask,
-    maskSum.data()
+    maskSum.data(),
+    convWorkspace.data()
   );
 
   assert(outputs.size() == batchSize);
@@ -1297,13 +1691,16 @@ bool NeuralNet::testEvaluateConv(
 ) {
   if(!useNHWC || useFP16)
     return false;
-  ConvLayer layer(*desc);
+  ConvLayer layer(*desc,nnXLen,nnYLen);
   TENSORMAP4 inTensor(
     (float*)inputBuffer.data(), desc->inChannels, nnXLen, nnYLen, batchSize);
   TENSOR4 outTensorBuf(desc->outChannels, nnXLen, nnYLen, batchSize);
   TENSORMAP4 outTensor(outTensorBuf);
+  size_t convWorkspaceElts = layer.requiredConvWorkspaceElts(batchSize);
+  vector<float> convWorkspace(convWorkspaceElts);
 
-  layer.apply(&inTensor, &outTensor, false);
+  ComputeHandleInternal handle;
+  layer.apply(&handle, &inTensor, &outTensor, convWorkspace.data(), false);
 
   outputBuffer.resize(outTensorBuf.size());
   memcpy(outputBuffer.data(), outTensorBuf.data(), sizeof(SCALAR) * outTensorBuf.size());
@@ -1337,10 +1734,6 @@ bool NeuralNet::testEvaluateBatchNorm(
   return true;
 }
 
-// CR lpuchallafiore: test evaluate activation layer.
-// CR lpuchallafiore: test evaluate matmul layer.
-// CR lpuchallafiore: test evaluate matbias layer.
-
 bool NeuralNet::testEvaluateResidualBlock(
   const ResidualBlockDesc* desc,
   int batchSize,
@@ -1354,9 +1747,11 @@ bool NeuralNet::testEvaluateResidualBlock(
 ) {
   if(!useNHWC || useFP16)
     return false;
-  ResidualBlock block(*desc);
+  ResidualBlock block(*desc,nnXLen,nnYLen);
   TENSORMAP4 inTensor((float*)inputBuffer.data(), desc->preBN.numChannels, nnXLen, nnYLen, batchSize);
   TENSORMAP3 mask((float*)maskBuffer.data(), nnXLen, nnYLen, batchSize);
+  size_t convWorkspaceElts = block.requiredConvWorkspaceElts(batchSize);
+  vector<float> convWorkspace(convWorkspaceElts);
 
   TENSOR4 trunkBuf(desc->preBN.numChannels, nnXLen, nnYLen, batchSize);
   TENSOR4 trunkScratchBuf(desc->preBN.numChannels, nnXLen, nnYLen, batchSize);
@@ -1370,7 +1765,9 @@ bool NeuralNet::testEvaluateResidualBlock(
 
   trunk = inTensor;
 
+  ComputeHandleInternal handle;
   block.apply(
+    &handle,
     &trunk,
     &trunkScratch,
     NULL,
@@ -1382,7 +1779,8 @@ bool NeuralNet::testEvaluateResidualBlock(
     NULL,
     NULL,
     &mask,
-    NULL
+    NULL,
+    convWorkspace.data()
   );
 
   outputBuffer.resize(trunk.size());
@@ -1403,10 +1801,12 @@ bool NeuralNet::testEvaluateGlobalPoolingResidualBlock(
   if(!useNHWC || useFP16)
     return false;
 
-  GlobalPoolingResidualBlock block(*desc);
+  GlobalPoolingResidualBlock block(*desc,nnXLen,nnYLen);
 
   TENSORMAP4 inTensor((float*)inputBuffer.data(), desc->preBN.numChannels, nnXLen, nnYLen, batchSize);
   TENSORMAP3 mask((float*)maskBuffer.data(), nnXLen, nnYLen, batchSize);
+  size_t convWorkspaceElts = block.requiredConvWorkspaceElts(batchSize);
+  vector<float> convWorkspace(convWorkspaceElts);
 
   TENSOR4 trunkBuf(desc->preBN.numChannels, nnXLen, nnYLen, batchSize);
   TENSOR4 trunkScratchBuf(desc->preBN.numChannels, nnXLen, nnYLen, batchSize);
@@ -1431,7 +1831,9 @@ bool NeuralNet::testEvaluateGlobalPoolingResidualBlock(
 
   trunk = inTensor;
 
+  ComputeHandleInternal handle;
   block.apply(
+    &handle,
     &trunk,
     &trunkScratch,
     &regularOut,
@@ -1443,7 +1845,8 @@ bool NeuralNet::testEvaluateGlobalPoolingResidualBlock(
     &gpoolConcat,
     &gpoolBias,
     &mask,
-    maskSum.data()
+    maskSum.data(),
+    convWorkspace.data()
   );
 
   outputBuffer.resize(trunk.size());
@@ -1453,7 +1856,3 @@ bool NeuralNet::testEvaluateGlobalPoolingResidualBlock(
 }
 
 #endif  // USE_EIGEN_BACKEND
-
-// CR lpuchallafiore: test evaluate Trunk
-// CR lpuchallafiore: test evaluate Policy Head
-// CR lpuchallafiore: test evaluate Value Head
