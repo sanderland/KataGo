@@ -84,16 +84,11 @@ string getHomeDirWindows(){
 
 
   //On Windows, use other env vars to get home dir, if it fails we just make something inside the directory containing the executable
-string HomeData::getHomeDataDir(bool makeDir) {
-=======
-//On Windows, instead of home directory, we just make something inside the directory containing the executable
 string HomeData::getHomeDataDir(bool makeDir, const string& homeDataDirOverride) {
   if(homeDataDirOverride != "") {
     if(makeDir) MakeDir::make(homeDataDirOverride);
     return homeDataDirOverride;
   }
-
->>>>>>> 2de36ea69960548207d7b596402cee04ebbba284
   //HACK: add 2048 to the buffer size to be resilient to longer paths, beyond MAX_PATH.
   constexpr size_t bufSize = MAX_PATH + 2048;
   wchar_t buf[bufSize];
