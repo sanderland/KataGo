@@ -20,7 +20,17 @@
           "name": "USE_BACKEND",
           "value": "OPENCL",
           "type": "STRING"
-        }
+        },
+        {
+          "name": "EIGEN3_INCLUDE_DIRS",
+          "value": "C:\\Users\\sande\\Desktop\\work\\eigen-3.3.7",
+          "type": "STRING"
+        },
+        {
+          "name": "CMAKE_PREFIX_PATH",
+          "value": "C:\\Users\\sande\\Desktop\\work\\eigen-3.3.7\\cmake",
+          "type": "STRING"
+        } 
       ]
     },
     {
@@ -47,6 +57,11 @@
         {
           "name": "EIGEN3_INCLUDE_DIRS",
           "value": "C:\\Users\\sande\\Desktop\\work\\eigen-3.3.7",
+          "type": "STRING"
+        },
+        {
+          "name": "Eigen3_DIR",
+          "value": "C:\\Users\\sande\\Desktop\\work\\eigen-3.3.7\\cmake",
           "type": "STRING"
         }
 
