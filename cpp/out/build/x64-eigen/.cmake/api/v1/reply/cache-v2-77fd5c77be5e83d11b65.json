@@ -114,28 +114,16 @@
 			"value" : "C:/Users/sande/Desktop/work/vcpkg/installed/x64-windows/lib/boost_system-vc140-mt.lib"
 		},
 		{
-			"name" : "Boost_USE_STATIC_LIBS_ON",
-			"properties" : 
-			[
-				{
-					"name" : "HELPSTRING",
-					"value" : "Compile against boost statically instead of dynamically"
-				}
-			],
-			"type" : "BOOL",
-			"value" : "0"
-		},
-		{
 			"name" : "CMAKE_BUILD_TYPE",
 			"properties" : 
 			[
 				{
 					"name" : "HELPSTRING",
-					"value" : "Choose the type of build, options are: None Debug Release RelWithDebInfo MinSizeRel ..."
+					"value" : "No help, variable specified on the command line."
 				}
 			],
 			"type" : "STRING",
-			"value" : "Debug"
+			"value" : "Release"
 		},
 		{
 			"name" : "CMAKE_CACHEFILE_DIR",
@@ -147,7 +135,7 @@
 				}
 			],
 			"type" : "INTERNAL",
-			"value" : "c:/Users/sande/Desktop/work/KataGo/cpp/out/build/x64-Debug"
+			"value" : "c:/Users/sande/Desktop/work/KataGo/cpp/out/build/x64-eigen"
 		},
 		{
 			"name" : "CMAKE_CACHE_MAJOR_VERSION",
@@ -171,7 +159,7 @@
 				}
 			],
 			"type" : "INTERNAL",
-			"value" : "16"
+			"value" : "17"
 		},
 		{
 			"name" : "CMAKE_CACHE_PATCH_VERSION",
@@ -183,7 +171,7 @@
 				}
 			],
 			"type" : "INTERNAL",
-			"value" : "19112601"
+			"value" : "20032601"
 		},
 		{
 			"name" : "CMAKE_COMMAND",
@@ -235,7 +223,7 @@
 				}
 			],
 			"type" : "FILEPATH",
-			"value" : "C:/Program Files (x86)/Microsoft Visual Studio/2019/Community/VC/Tools/MSVC/14.25.28610/bin/HostX64/x64/cl.exe"
+			"value" : "C:/Program Files (x86)/Microsoft Visual Studio/2019/Community/VC/Tools/MSVC/14.27.29110/bin/Hostx64/x64/cl.exe"
 		},
 		{
 			"name" : "CMAKE_CXX_FLAGS",
@@ -347,7 +335,7 @@
 				}
 			],
 			"type" : "FILEPATH",
-			"value" : "C:/Program Files (x86)/Microsoft Visual Studio/2019/Community/VC/Tools/MSVC/14.25.28610/bin/HostX64/x64/cl.exe"
+			"value" : "C:/Program Files (x86)/Microsoft Visual Studio/2019/Community/VC/Tools/MSVC/14.27.29110/bin/Hostx64/x64/cl.exe"
 		},
 		{
 			"name" : "CMAKE_C_FLAGS",
@@ -551,7 +539,7 @@
 				}
 			],
 			"type" : "BOOL",
-			"value" : "OFF"
+			"value" : ""
 		},
 		{
 			"name" : "CMAKE_EXTRA_GENERATOR",
@@ -614,18 +602,6 @@
 			"value" : ""
 		},
 		{
-			"name" : "CMAKE_HAVE_PTHREAD_H",
-			"properties" : 
-			[
-				{
-					"name" : "HELPSTRING",
-					"value" : "Have include pthread.h"
-				}
-			],
-			"type" : "INTERNAL",
-			"value" : ""
-		},
-		{
 			"name" : "CMAKE_HOME_DIRECTORY",
 			"properties" : 
 			[
@@ -647,7 +623,7 @@
 				}
 			],
 			"type" : "PATH",
-			"value" : "C:/Users/sande/Desktop/work/KataGo/x64-Release"
+			"value" : "C:/Users/sande/Desktop/work/KataGo/cpp/out/install/x64-eigen"
 		},
 		{
 			"name" : "CMAKE_LINKER",
@@ -663,7 +639,7 @@
 				}
 			],
 			"type" : "FILEPATH",
-			"value" : "C:/Program Files (x86)/Microsoft Visual Studio/2019/Community/VC/Tools/MSVC/14.25.28610/bin/Hostx64/x64/link.exe"
+			"value" : "C:/Program Files (x86)/Microsoft Visual Studio/2019/Community/VC/Tools/MSVC/14.27.29110/bin/Hostx64/x64/link.exe"
 		},
 		{
 			"name" : "CMAKE_MAKE_PROGRAM",
@@ -951,7 +927,7 @@
 				}
 			],
 			"type" : "INTERNAL",
-			"value" : "C:/Program Files (x86)/Microsoft Visual Studio/2019/Community/Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/share/cmake-3.16"
+			"value" : "C:/Program Files (x86)/Microsoft Visual Studio/2019/Community/Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/share/cmake-3.17"
 		},
 		{
 			"name" : "CMAKE_SHARED_LINKER_FLAGS",
@@ -1178,6 +1154,30 @@
 			"value" : "FALSE"
 		},
 		{
+			"name" : "EIGEN3_INCLUDE_DIRS",
+			"properties" : 
+			[
+				{
+					"name" : "HELPSTRING",
+					"value" : "No help, variable specified on the command line."
+				}
+			],
+			"type" : "STRING",
+			"value" : "C:\\Users\\sande\\Desktop\\work\\eigen-3.3.7"
+		},
+		{
+			"name" : "Eigen3_DIR",
+			"properties" : 
+			[
+				{
+					"name" : "HELPSTRING",
+					"value" : "No help, variable specified on the command line."
+				}
+			],
+			"type" : "STRING",
+			"value" : "C:\\Users\\sande\\Desktop\\work\\eigen-3.3.7\\cmake"
+		},
+		{
 			"name" : "FIND_PACKAGE_MESSAGE_DETAILS_Boost",
 			"properties" : 
 			[
@@ -1188,30 +1188,6 @@
 			],
 			"type" : "INTERNAL",
 			"value" : "[C:/Users/sande/Desktop/work/vcpkg/installed/x64-windows/include][cfound components: system filesystem ][v1.72.0()]"
-		},
-		{
-			"name" : "FIND_PACKAGE_MESSAGE_DETAILS_OpenCL",
-			"properties" : 
-			[
-				{
-					"name" : "HELPSTRING",
-					"value" : "Details about finding OpenCL"
-				}
-			],
-			"type" : "INTERNAL",
-			"value" : "[C:/Users/sande/Desktop/work/vcpkg/installed/x64-windows/debug/lib/OpenCL.lib][C:/Users/sande/Desktop/work/vcpkg/installed/x64-windows/include][v2.2()]"
-		},
-		{
-			"name" : "FIND_PACKAGE_MESSAGE_DETAILS_Threads",
-			"properties" : 
-			[
-				{
-					"name" : "HELPSTRING",
-					"value" : "Details about finding Threads"
-				}
-			],
-			"type" : "INTERNAL",
-			"value" : "[TRUE][v()]"
 		},
 		{
 			"name" : "FIND_PACKAGE_MESSAGE_DETAILS_ZLIB",
@@ -1226,58 +1202,6 @@
 			"value" : "[optimized;C:/Users/sande/Desktop/work/vcpkg/installed/x64-windows/lib/zlib.lib;debug;C:/Users/sande/Desktop/work/vcpkg/installed/x64-windows/debug/lib/zlibd.lib][C:/Users/sande/Desktop/work/vcpkg/installed/x64-windows/include][v1.2.11()]"
 		},
 		{
-			"name" : "GIT_EXECUTABLE",
-			"properties" : 
-			[
-				{
-					"name" : "ADVANCED",
-					"value" : "1"
-				},
-				{
-					"name" : "HELPSTRING",
-					"value" : "Git command line client"
-				}
-			],
-			"type" : "FILEPATH",
-			"value" : "GIT_EXECUTABLE-NOTFOUND"
-		},
-		{
-			"name" : "LIBZIP_INCLUDE_DIR_ZIP",
-			"properties" : 
-			[
-				{
-					"name" : "HELPSTRING",
-					"value" : "Path to a file."
-				}
-			],
-			"type" : "PATH",
-			"value" : "LIBZIP_INCLUDE_DIR_ZIP-NOTFOUND"
-		},
-		{
-			"name" : "LIBZIP_INCLUDE_DIR_ZIPCONF",
-			"properties" : 
-			[
-				{
-					"name" : "HELPSTRING",
-					"value" : "Path to a file."
-				}
-			],
-			"type" : "PATH",
-			"value" : "LIBZIP_INCLUDE_DIR_ZIPCONF-NOTFOUND"
-		},
-		{
-			"name" : "LIBZIP_LIBRARY",
-			"properties" : 
-			[
-				{
-					"name" : "HELPSTRING",
-					"value" : "Path to a library."
-				}
-			],
-			"type" : "FILEPATH",
-			"value" : "LIBZIP_LIBRARY-NOTFOUND"
-		},
-		{
 			"name" : "NO_GIT_REVISION",
 			"properties" : 
 			[
@@ -1290,50 +1214,6 @@
 			"value" : "True"
 		},
 		{
-			"name" : "OPENCL_VERSION_2_2",
-			"properties" : 
-			[
-				{
-					"name" : "HELPSTRING",
-					"value" : "Have symbol CL_VERSION_2_2"
-				}
-			],
-			"type" : "INTERNAL",
-			"value" : "1"
-		},
-		{
-			"name" : "OpenCL_INCLUDE_DIR",
-			"properties" : 
-			[
-				{
-					"name" : "ADVANCED",
-					"value" : "1"
-				},
-				{
-					"name" : "HELPSTRING",
-					"value" : "Path to a file."
-				}
-			],
-			"type" : "PATH",
-			"value" : "C:/Users/sande/Desktop/work/vcpkg/installed/x64-windows/include"
-		},
-		{
-			"name" : "OpenCL_LIBRARY",
-			"properties" : 
-			[
-				{
-					"name" : "ADVANCED",
-					"value" : "1"
-				},
-				{
-					"name" : "HELPSTRING",
-					"value" : "Path to a library."
-				}
-			],
-			"type" : "FILEPATH",
-			"value" : "C:/Users/sande/Desktop/work/vcpkg/installed/x64-windows/debug/lib/OpenCL.lib"
-		},
-		{
 			"name" : "USE_BACKEND",
 			"properties" : 
 			[
@@ -1343,11 +1223,11 @@
 				},
 				{
 					"name" : "STRINGS",
-					"value" : ";CUDA;OPENCL"
+					"value" : ";CUDA;OPENCL;EIGEN"
 				}
 			],
 			"type" : "STRING",
-			"value" : "OPENCL"
+			"value" : "EIGEN"
 		},
 		{
 			"name" : "USE_TCMALLOC",
@@ -1555,7 +1435,7 @@
 				}
 			],
 			"type" : "FILEPATH",
-			"value" : "C:/Program Files (x86)/Microsoft Visual Studio/2019/Community/VC/Tools/MSVC/14.25.28610/bin/Hostx64/x64/cl.exe"
+			"value" : "C:/Program Files (x86)/Microsoft Visual Studio/2019/Community/VC/Tools/MSVC/14.27.29110/bin/Hostx64/x64/cl.exe"
 		},
 		{
 			"name" : "_VCPKG_ROOT_DIR",
@@ -1579,7 +1459,7 @@
 				}
 			],
 			"type" : "STATIC",
-			"value" : "C:/Users/sande/Desktop/work/KataGo/cpp/out/build/x64-Debug"
+			"value" : "C:/Users/sande/Desktop/work/KataGo/cpp/out/build/x64-eigen"
 		},
 		{
 			"name" : "katago_SOURCE_DIR",

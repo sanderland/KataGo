@@ -2485,6 +2485,14 @@ static size_t roundUpToMultiple(size_t size, size_t ofThis) {
   return (size + ofThis - 1) / ofThis * ofThis;
 }
 
+struct ComputeHandleInternal {
+  // static constexpr int numEigenThreads = 2;
+  // Eigen::ThreadPool threadPool;
+  // Eigen::ThreadPoolDevice device;
+
+  ComputeHandleInternal() {}
+};
+
 // Convolution layer with zero-padding.
 struct ConvLayer {
   string name;
@@ -2617,7 +2625,7 @@ struct ConvLayer {
       TENSOR4 kernel = TensorMap<const Tensor<const SCALAR, 4>>(desc.weights.data(), convXSize, convYSize, inChannels, outChannels);
       imagePatchSize = convXSize * convYSize * inChannels;
       Eigen::array<int, 4> dimensionPermutatation({3, 2, 0, 1});
-      Eigen::array<int, 2> newShape({outChannels, imagePatchSize});
+      Eigen::array<int64_t, 2> newShape({outChannels, imagePatchSize});
       imagePatchKernel = kernel.shuffle(dimensionPermutatation).reshape(newShape);
     }
   }
@@ -3642,8 +3650,9 @@ struct ComputeHandle {
   //eigen
   int maxBatchSize;
   const ComputeContext* eigen_context;
-  eigenbackend::Model eigen_model;
+  eigenbackend::Model* eigen_model;
   eigenbackend::Buffers* eigen_buffers;
+  eigenbackend::ComputeHandleInternal* eigen_handle;
 
   ComputeHandle(
     ComputeContext* context, const LoadedModel* loadedModel, int maxBSize, int gpuIdx, bool inputsNHWC
@@ -3654,10 +3663,11 @@ struct ComputeHandle {
     inputsUseNHWC = inputsNHWC;
     maxBatchSize = maxBSize;
     if(EIGEN_FALLBACK) {
-      handle = nullptr;      
+      eigen_handle = new eigenbackend::ComputeHandleInternal();
       eigen_context = context;
-      eigen_model = new EigenModel(loadedModel->modelDesc,context->nnXLen,context->nnYLen,maxBSize),
-      eigen_buffers = new EigenBuffers(loadedModel->modelDesc,model,maxBSize,ctx->nnXLen,ctx->nnYLen);
+      eigen_model = new eigenbackend::Model(loadedModel->modelDesc,context->nnXLen,context->nnYLen,maxBSize),
+      eigen_buffers =
+        new eigenbackend::Buffers(loadedModel->modelDesc, *eigen_model, maxBSize, context->nnXLen, context->nnYLen);
     }
     else { // OPENCL
       bool useNHWC = context->usingNHWCMode == enabled_t::True ? true : false;
@@ -3783,6 +3793,9 @@ struct InputBuffers {
   float* ownershipResults; //Host pointer
   half_t* ownershipResultsHalf; //Host pointer
 
+  std::vector<float> spatialInput;
+  std::vector<float> globalInput;
+
   InputBuffers(const LoadedModel* loadedModel, int maxBatchSz, int nnXLen, int nnYLen) {
     const ModelDesc& m = loadedModel->modelDesc;
 
@@ -3821,6 +3834,9 @@ struct InputBuffers {
     scoreValueResults = new float[(size_t)maxBatchSize * m.numScoreValueChannels];
     ownershipResults = new float[(size_t)maxBatchSize * xSize * ySize * m.numOwnershipChannels];
     ownershipResultsHalf = new half_t[(size_t)maxBatchSize * xSize * ySize * m.numOwnershipChannels];
+
+    spatialInput = vector<float>(m.numInputChannels * xSize * ySize * maxBatchSize);
+    globalInput = vector<float>(m.numInputGlobalChannels * maxBatchSize);
   }
 
   ~InputBuffers() {
@@ -3867,7 +3883,7 @@ void NeuralNet::getOutput(
     int batchSize = numBatchEltsFilled;
     int nnXLen = computeHandle->eigen_context->nnXLen;
     int nnYLen = computeHandle->eigen_context->nnYLen;
-    int version = computeHandle->eigen_model.version;
+    int version = computeHandle->eigen_model->version;
 
     int numSpatialFeatures = NNModelVersion::getNumSpatialFeatures(version);
     int numGlobalFeatures = NNModelVersion::getNumGlobalFeatures(version);
@@ -3925,8 +3941,8 @@ void NeuralNet::getOutput(
     eigenbackend::computeMaskSum(&mask,maskSum.data());
     vector<float>& convWorkspace = buffers.convWorkspace;
 
-    computeHandle->eigen_model.apply(
-      &computeHandle->handleInternal,
+    computeHandle->eigen_model->apply(
+      computeHandle->eigen_handle,
       &input,
       &inputGlobal,
       &inputMatMulOut,
@@ -3982,7 +3998,7 @@ void NeuralNet::getOutput(
       SymmetryHelpers::copyOutputsWithSymmetry(policySrcBuf, policyProbs, 1, nnYLen, nnXLen, symmetry);
       policyProbs[inputBuffers->singlePolicyResultElts] = policyPassData[row];
 
-      int numValueChannels = computeHandle->eigen_model.numValueChannels;
+      int numValueChannels = computeHandle->eigen_model->numValueChannels;
       assert(numValueChannels == 3);
       output->whiteWinProb = valueData[row * numValueChannels];
       output->whiteLossProb = valueData[row * numValueChannels + 1];
@@ -3997,7 +4013,7 @@ void NeuralNet::getOutput(
       }
 
       if(version >= 8) {
-        int numScoreValueChannels = computeHandle->eigen_model.numScoreValueChannels;
+        int numScoreValueChannels = computeHandle->eigen_model->numScoreValueChannels;
         assert(numScoreValueChannels == 4);
         output->whiteScoreMean = scoreValueData[row * numScoreValueChannels];
         output->whiteScoreMeanSq = scoreValueData[row * numScoreValueChannels + 1];
@@ -4005,7 +4021,7 @@ void NeuralNet::getOutput(
         output->varTimeLeft = scoreValueData[row * numScoreValueChannels + 3];
       }
       else if(version >= 4) {
-        int numScoreValueChannels = computeHandle->eigen_model.numScoreValueChannels;
+        int numScoreValueChannels = computeHandle->eigen_model->numScoreValueChannels;
         assert(numScoreValueChannels == 2);
         output->whiteScoreMean = scoreValueData[row * numScoreValueChannels];
         output->whiteScoreMeanSq = scoreValueData[row * numScoreValueChannels + 1];
@@ -4013,7 +4029,7 @@ void NeuralNet::getOutput(
         output->varTimeLeft = 0;
       }
       else if(version >= 3) {
-        int numScoreValueChannels = computeHandle->eigen_model.numScoreValueChannels;
+        int numScoreValueChannels = computeHandle->eigen_model->numScoreValueChannels;
         assert(numScoreValueChannels == 1);
         output->whiteScoreMean = scoreValueData[row * numScoreValueChannels];
         //Version 3 neural nets don't have any second moment output, implicitly already folding it in, so we just use the mean squared
@@ -4291,5 +4307,259 @@ void NeuralNet::getOutput(
 }
 
 
+
+bool NeuralNet::testEvaluateConv(
+  const ConvLayerDesc* desc,
+  int batchSize,
+  int nnXLen,
+  int nnYLen,
+  bool useFP16,
+  bool useNHWC,
+  const std::vector<float>& inputBuffer,
+  std::vector<float>& outputBuffer) {
+  Logger* logger = NULL;
+  cl_int err;
+  int gpuIdx = 0;
+
+  if(useNHWC != false)
+    return false;
+
+  ComputeContext* context = createComputeContextForTesting({gpuIdx}, logger, nnXLen, nnYLen, useFP16, useNHWC);
+  ComputeHandleInternal* handle = new ComputeHandleInternal(context, gpuIdx, useNHWC, useNHWC);
+
+  ConvLayer* layer = new ConvLayer(handle, desc, nnXLen, nnYLen, useFP16);
+
+  size_t numInputFloats = (size_t)batchSize * nnXLen * nnYLen * desc->inChannels;
+  size_t numOutputFloats = (size_t)batchSize * nnXLen * nnYLen * desc->outChannels;
+  if(numInputFloats != inputBuffer.size())
+    throw StringError("testEvaluateConv: unexpected input buffer size");
+  outputBuffer.resize(numOutputFloats);
+
+  vector<float> inputTmp = inputBuffer;
+  cl_mem input = createReadOnlyBuffer(handle, inputTmp, useFP16);
+  size_t convWorkspaceElts = layer->requiredConvWorkspaceElts(handle, batchSize);
+  cl_mem convWorkspace = createReadWriteBuffer(handle, convWorkspaceElts);
+  cl_mem convWorkspace2 = createReadWriteBuffer(handle, convWorkspaceElts);
+
+  cl_mem output =
+    clCreateBuffer(handle->clContext, CL_MEM_READ_WRITE, byteSizeofVectorContents(outputBuffer), NULL, &err);
+  CHECK_ERR(err);
+  layer->apply(handle, batchSize, input, output, convWorkspace, convWorkspace2);
+
+  blockingReadBuffer(handle->commandQueue, output, numOutputFloats, outputBuffer, useFP16);
+
+  clReleaseMemObject(output);
+  clReleaseMemObject(convWorkspace);
+  clReleaseMemObject(convWorkspace2);
+  clReleaseMemObject(input);
+  delete layer;
+  delete handle;
+  freeComputeContext(context);
+
+  return true;
+}
+
+// Mask should be in 'NHW' format (no "C" channel).
+bool NeuralNet::testEvaluateBatchNorm(
+  const BatchNormLayerDesc* desc,
+  int batchSize,
+  int nnXLen,
+  int nnYLen,
+  bool useFP16,
+  bool useNHWC,
+  const std::vector<float>& inputBuffer,
+  const std::vector<float>& maskBuffer,
+  std::vector<float>& outputBuffer) {
+  Logger* logger = NULL;
+  cl_int err;
+  int gpuIdx = 0;
+
+  if(useNHWC != false)
+    return false;
+
+  ComputeContext* context = createComputeContextForTesting({gpuIdx}, logger, nnXLen, nnYLen, useFP16, useNHWC);
+  ComputeHandleInternal* handle = new ComputeHandleInternal(context, gpuIdx, useNHWC, useNHWC);
+
+  BatchNormLayer* layer = new BatchNormLayer(handle, desc, nnXLen, nnYLen, useFP16);
+
+  size_t numInputFloats = (size_t)batchSize * nnXLen * nnYLen * desc->numChannels;
+  size_t numOutputFloats = (size_t)batchSize * nnXLen * nnYLen * desc->numChannels;
+  if(numInputFloats != inputBuffer.size())
+    throw StringError("testEvaluateBatchNorm: unexpected input buffer size");
+  outputBuffer.resize(numOutputFloats);
+
+  vector<float> inputTmp = inputBuffer;
+  vector<float> maskTmp = maskBuffer;
+  cl_mem input = createReadOnlyBuffer(handle, inputTmp, useFP16);
+  cl_mem mask = createReadOnlyBuffer(handle, maskTmp, useFP16);
+
+  cl_mem output =
+    clCreateBuffer(handle->clContext, CL_MEM_WRITE_ONLY, byteSizeofVectorContents(outputBuffer), NULL, &err);
+  CHECK_ERR(err);
+  bool applyRelu = false;
+  layer->apply(handle, batchSize, applyRelu, input, output, mask);
+
+  blockingReadBuffer(handle->commandQueue, output, numOutputFloats, outputBuffer, useFP16);
+
+  clReleaseMemObject(input);
+  clReleaseMemObject(mask);
+  clReleaseMemObject(output);
+  delete layer;
+  delete handle;
+  freeComputeContext(context);
+
+  return true;
+}
+
+bool NeuralNet::testEvaluateResidualBlock(
+  const ResidualBlockDesc* desc,
+  int batchSize,
+  int nnXLen,
+  int nnYLen,
+  bool useFP16,
+  bool useNHWC,
+  const std::vector<float>& inputBuffer,
+  const std::vector<float>& maskBuffer,
+  std::vector<float>& outputBuffer) {
+  Logger* logger = NULL;
+  int gpuIdx = 0;
+
+  if(useNHWC != false)
+    return false;
+
+  ComputeContext* context = createComputeContextForTesting({gpuIdx}, logger, nnXLen, nnYLen, useFP16, useNHWC);
+  ComputeHandleInternal* handle = new ComputeHandleInternal(context, gpuIdx, useNHWC, useNHWC);
+
+  ResidualBlock* layer = new ResidualBlock(handle, desc, nnXLen, nnYLen, useFP16);
+
+  size_t numTrunkFloats = (size_t)batchSize * nnXLen * nnYLen * desc->preBN.numChannels;
+  size_t numMaskFloats = (size_t)batchSize * nnXLen * nnYLen;
+  size_t numMidFloats = (size_t)batchSize * nnXLen * nnYLen * desc->finalConv.inChannels;
+  if(numTrunkFloats != inputBuffer.size())
+    throw StringError("testEvaluateResidualBlock: unexpected input buffer size");
+  if(numMaskFloats != maskBuffer.size())
+    throw StringError("testEvaluateResidualBlock: unexpected mask buffer size");
+  outputBuffer.resize(numTrunkFloats);
+
+  vector<float> inputTmp = inputBuffer;
+  vector<float> maskTmp = maskBuffer;
+  cl_mem trunk = createReadWriteBuffer(handle, inputTmp, useFP16);
+  cl_mem mask = createReadOnlyBuffer(handle, maskTmp, useFP16);
+  cl_mem trunkScratch = createReadWriteBuffer(handle, numTrunkFloats);
+  cl_mem mid = createReadWriteBuffer(handle, numMidFloats);
+  cl_mem midScratch = createReadWriteBuffer(handle, numMidFloats);
+
+  size_t convWorkspaceElts = layer->requiredConvWorkspaceElts(handle, batchSize);
+  cl_mem convWorkspace = createReadWriteBuffer(handle, convWorkspaceElts);
+  cl_mem convWorkspace2 = createReadWriteBuffer(handle, convWorkspaceElts);
+
+  layer->apply(handle, batchSize, trunk, trunkScratch, mid, midScratch, mask, convWorkspace, convWorkspace2);
+
+  blockingReadBuffer(handle->commandQueue, trunk, numTrunkFloats, outputBuffer, useFP16);
+
+  clReleaseMemObject(trunk);
+  clReleaseMemObject(mask);
+  clReleaseMemObject(trunkScratch);
+  clReleaseMemObject(mid);
+  clReleaseMemObject(midScratch);
+  clReleaseMemObject(convWorkspace);
+  clReleaseMemObject(convWorkspace2);
+  delete layer;
+  delete handle;
+  freeComputeContext(context);
+
+  return true;
+}
+
+bool NeuralNet::testEvaluateGlobalPoolingResidualBlock(
+  const GlobalPoolingResidualBlockDesc* desc,
+  int batchSize,
+  int nnXLen,
+  int nnYLen,
+  bool useFP16,
+  bool useNHWC,
+  const std::vector<float>& inputBuffer,
+  const std::vector<float>& maskBuffer,
+  std::vector<float>& outputBuffer) {
+  Logger* logger = NULL;
+  int gpuIdx = 0;
+
+  if(useNHWC != false)
+    return false;
+
+  ComputeContext* context = createComputeContextForTesting({gpuIdx}, logger, nnXLen, nnYLen, useFP16, useNHWC);
+  ComputeHandleInternal* handle = new ComputeHandleInternal(context, gpuIdx, useNHWC, useNHWC);
+
+  GlobalPoolingResidualBlock* layer = new GlobalPoolingResidualBlock(handle, desc, nnXLen, nnYLen, useFP16);
+
+  size_t numTrunkFloats = (size_t)batchSize * nnXLen * nnYLen * desc->preBN.numChannels;
+  size_t numMaskFloats = (size_t)batchSize * nnXLen * nnYLen;
+  size_t numMaskSumFloats = (size_t)batchSize;
+  size_t numMidFloats = (size_t)batchSize * nnXLen * nnYLen * desc->finalConv.inChannels;
+  size_t numGPoolOutFloats = (size_t)batchSize * nnXLen * nnYLen * desc->gpoolConv.outChannels;
+  size_t numGPoolConcatFloats = (size_t)batchSize * 3 * desc->gpoolConv.outChannels;
+  size_t numGPoolBiasFloats = (size_t)batchSize * desc->regularConv.outChannels;
+
+  if(numTrunkFloats != inputBuffer.size())
+    throw StringError("testEvaluateResidualBlock: unexpected input buffer size");
+  if(numMaskFloats != maskBuffer.size())
+    throw StringError("testEvaluateResidualBlock: unexpected mask buffer size");
+  outputBuffer.resize(numTrunkFloats);
+
+  vector<float> inputTmp = inputBuffer;
+  vector<float> maskTmp = maskBuffer;
+  cl_mem trunk = createReadWriteBuffer(handle, inputTmp, useFP16);
+  cl_mem mask = createReadOnlyBuffer(handle, maskTmp, useFP16);
+  cl_mem maskSum = createReadWriteBuffer(handle, numMaskSumFloats);
+  cl_mem trunkScratch = createReadWriteBuffer(handle, numTrunkFloats);
+  cl_mem mid = createReadWriteBuffer(handle, numMidFloats);
+  cl_mem midScratch = createReadWriteBuffer(handle, numMidFloats);
+  cl_mem gpoolOut = createReadWriteBuffer(handle, numGPoolOutFloats);
+  cl_mem gpoolOut2 = createReadWriteBuffer(handle, numGPoolOutFloats);
+  cl_mem gpoolConcat = createReadWriteBuffer(handle, numGPoolConcatFloats);
+  cl_mem gpoolBias = createReadWriteBuffer(handle, numGPoolBiasFloats);
+
+  size_t convWorkspaceElts = layer->requiredConvWorkspaceElts(handle, batchSize);
+  cl_mem convWorkspace = createReadWriteBuffer(handle, convWorkspaceElts);
+  cl_mem convWorkspace2 = createReadWriteBuffer(handle, convWorkspaceElts);
+
+  computeMaskSums(handle, mask, maskSum, batchSize, nnXLen, nnYLen);
+
+  layer->apply(
+    handle,
+    batchSize,
+    trunk,
+    trunkScratch,
+    mid,
+    midScratch,
+    gpoolOut,
+    gpoolOut2,
+    gpoolConcat,
+    gpoolBias,
+    mask,
+    maskSum,
+    convWorkspace,
+    convWorkspace2);
+
+  blockingReadBuffer(handle->commandQueue, trunk, numTrunkFloats, outputBuffer, useFP16);
+
+  clReleaseMemObject(trunk);
+  clReleaseMemObject(mask);
+  clReleaseMemObject(maskSum);
+  clReleaseMemObject(trunkScratch);
+  clReleaseMemObject(mid);
+  clReleaseMemObject(midScratch);
+  clReleaseMemObject(gpoolOut);
+  clReleaseMemObject(gpoolOut2);
+  clReleaseMemObject(gpoolConcat);
+  clReleaseMemObject(gpoolBias);
+  clReleaseMemObject(convWorkspace);
+  clReleaseMemObject(convWorkspace2);
+  delete layer;
+  delete handle;
+  freeComputeContext(context);
+
+  return true;
+}
 
 #endif  // USE_OPENCL_BACKEND

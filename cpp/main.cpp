@@ -81,7 +81,7 @@ string Version::getKataGoVersion() {
 }
 
 string Version::getKataGoVersionForHelp() {
-  return string("KataGo v1.5.0+kt1.3.5 (minified,fasteigen)");
+  return string("KataGo v1.5.0+kt1.3.5 (minified,dual-backend)");
 }
 
 string Version::getKataGoVersionFullInfo() {

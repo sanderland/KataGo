@@ -58,8 +58,10 @@ vector<NNEvaluator*> Setup::initializeNNEvaluators(
   //for those options
   if(backendPrefix != "cuda")
     cfg.markAllKeysUsedWithPrefix("cuda");
-  if(backendPrefix != "opencl")
+  if(backendPrefix != "opencl") {
     cfg.markAllKeysUsedWithPrefix("opencl");
+    cfg.markAllKeysUsedWithPrefix("eigen"); // because of the cpu fallback hack
+  }
   if(backendPrefix != "eigen")
     cfg.markAllKeysUsedWithPrefix("eigen");
   if(backendPrefix != "dummybackend")
