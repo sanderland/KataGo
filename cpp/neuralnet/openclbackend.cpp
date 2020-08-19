@@ -341,6 +341,7 @@ struct ComputeContext {
   int nnYLen;
   enabled_t usingFP16Mode;
   enabled_t usingNHWCMode;
+  Logger* logger;
 
 #ifdef PROFILE_KERNELS
   static constexpr bool liveProfilingKernels = true;
@@ -352,13 +353,14 @@ struct ComputeContext {
 
   ComputeContext(
     const vector<int>& gIdxs,
-    Logger* logger,
+    Logger* _logger,
     int nnX,
     int nnY,
     enabled_t useFP16Mode,
     enabled_t useNHWCMode,
     std::function<OpenCLTuneParams(const string&,int)> getParamsForDeviceName
   ) {
+    logger = _logger;
     nnXLen = nnX;
     nnYLen = nnY;
     usingFP16Mode = useFP16Mode;
@@ -447,7 +449,7 @@ ComputeContext* NeuralNet::createComputeContext(
   const LoadedModel* loadedModel
 ) {
   if(gpuIdxs.size() <= 0) {
-    cerr << "NO GPU detected, using CPU backend";
+    logger->write("No GPU detected, using CPU backend");
     EIGEN_FALLBACK=true;
   }
   std::function<OpenCLTuneParams(const string&,int)> getParamsForDeviceName =
@@ -468,17 +470,9 @@ ComputeContext* NeuralNet::createComputeContext(
     return new ComputeContext(gpuIdxs,logger,nnXLen,nnYLen,useFP16Mode,useNHWCMode,getParamsForDeviceName);
   }
   catch(const StringError& err) {
-    cerr << "Error initializing GPU context " << err.what() << " Using CPU Backend" << endl;
+    logger->write("Error initializing GPU context " + string(err.what()) + " Using CPU Backend");
     EIGEN_FALLBACK = true;
   }
-  bool useFP16 = useFP16Mode == enabled_t::True ? true : false;
-  bool useNHWC = useNHWCMode == enabled_t::False ? false : true;
-
-  if(useFP16)
-    throw StringError("Eigen backend: useFP16 = true not supported");
-  if(!useNHWC)
-    throw StringError("Eigen backend: useNHWC = false not supported");
-
   return new ComputeContext(nnXLen,nnYLen);
 }
 
@@ -3662,14 +3656,7 @@ struct ComputeHandle {
     policySize = NNPos::getPolicySize(nnXLen, nnYLen);
     inputsUseNHWC = inputsNHWC;
     maxBatchSize = maxBSize;
-    if(EIGEN_FALLBACK) {
-      eigen_handle = new eigenbackend::ComputeHandleInternal();
-      eigen_context = context;
-      eigen_model = new eigenbackend::Model(loadedModel->modelDesc,context->nnXLen,context->nnYLen,maxBSize),
-      eigen_buffers =
-        new eigenbackend::Buffers(loadedModel->modelDesc, *eigen_model, maxBSize, context->nnXLen, context->nnYLen);
-    }
-    else { // OPENCL
+    if(!EIGEN_FALLBACK) {
       bool useNHWC = context->usingNHWCMode == enabled_t::True ? true : false;
       handle = new ComputeHandleInternal(context, gpuIdx, inputsNHWC, useNHWC);
       usingFP16Storage = handle->usingFP16Storage;
@@ -3678,6 +3665,10 @@ struct ComputeHandle {
       model = new Model(handle, &(loadedModel->modelDesc), maxBSize, nnXLen, nnYLen, usingFP16Storage);
       buffers = new Buffers(handle, *model);
     }
+    eigen_handle = new eigenbackend::ComputeHandleInternal();
+    eigen_context = context;
+    eigen_model = new eigenbackend::Model(loadedModel->modelDesc,context->nnXLen,context->nnYLen,maxBSize),
+    eigen_buffers = new eigenbackend::Buffers(loadedModel->modelDesc, *eigen_model, maxBSize, context->nnXLen, context->nnYLen);
   }
 
   ~ComputeHandle() {
@@ -3875,175 +3866,9 @@ void NeuralNet::getOutput(
   int symmetry,
   vector<NNOutput*>& outputs
 ) {
-  
-  if(EIGEN_FALLBACK) {
-    auto computeHandle = gpuHandle;
-    assert(numBatchEltsFilled <= inputBuffers->maxBatchSize);
-    assert(numBatchEltsFilled > 0);
-    int batchSize = numBatchEltsFilled;
-    int nnXLen = computeHandle->eigen_context->nnXLen;
-    int nnYLen = computeHandle->eigen_context->nnYLen;
-    int version = computeHandle->eigen_model->version;
 
-    int numSpatialFeatures = NNModelVersion::getNumSpatialFeatures(version);
-    int numGlobalFeatures = NNModelVersion::getNumGlobalFeatures(version);
-    assert(numSpatialFeatures == computeHandle->eigen_model.numInputChannels);
-    assert(numSpatialFeatures * nnXLen * nnYLen == inputBuffers->singleInputElts);
-    assert(numGlobalFeatures == inputBuffers->singleInputGlobalElts);
-
-    for(int nIdx = 0; nIdx<batchSize; nIdx++) {
-      float* rowSpatialInput = inputBuffers->spatialInput.data() + (inputBuffers->singleInputElts * nIdx);
-      float* rowGlobalInput = inputBuffers->globalInput.data() + (inputBuffers->singleInputGlobalElts * nIdx);
-
-      const float* rowGlobal = inputBufs[nIdx]->rowGlobal;
-      const float* rowSpatial = inputBufs[nIdx]->rowSpatial;
-      std::copy(rowGlobal,rowGlobal+numGlobalFeatures,rowGlobalInput);
-      SymmetryHelpers::copyInputsWithSymmetry(rowSpatial, rowSpatialInput, 1, nnYLen, nnXLen, numSpatialFeatures, computeHandle->inputsUseNHWC, symmetry);
-    }
-
-    eigenbackend::Buffers& buffers = *(computeHandle->eigen_buffers);
-
-    CONSTTENSORMAP4 input(inputBuffers->spatialInput.data(), numSpatialFeatures, nnXLen, nnYLen, batchSize);
-    CONSTTENSORMAP2 inputGlobal(inputBuffers->globalInput.data(), numGlobalFeatures, batchSize);
-
-  #define MAP4(NAME) TENSORMAP4 NAME(buffers.NAME.data(), buffers.NAME.dimension(0), buffers.NAME.dimension(1), buffers.NAME.dimension(2), batchSize)
-  #define MAP3(NAME) TENSORMAP3 NAME(buffers.NAME.data(), buffers.NAME.dimension(0), buffers.NAME.dimension(1), batchSize)
-  #define MAP2(NAME) TENSORMAP2 NAME(buffers.NAME.data(), buffers.NAME.dimension(0), batchSize)
-
-    MAP2(inputMatMulOut);
-    MAP4(trunk);
-    MAP4(trunkScratch);
-    MAP4(regularOut);
-    MAP4(regularScratch);
-    MAP4(midIn);
-    MAP4(midScratch);
-    MAP4(gpoolOut);
-    MAP4(gpoolOut2);
-    MAP2(gpoolConcat);
-    MAP2(gpoolBias);
-    MAP4(p1Out);
-    MAP4(p1Out2);
-    MAP4(g1Out);
-    MAP4(g1Out2);
-    MAP2(g1Concat);
-    MAP2(g1Bias);
-    MAP2(policyPass);
-    MAP4(policy);
-    MAP4(v1Out);
-    MAP4(v1Out2);
-    MAP2(v1Mean);
-    MAP2(v2Out);
-    MAP2(value);
-    MAP2(scoreValue);
-    MAP4(ownership);
-    MAP3(mask);
-    vector<float>& maskSum = buffers.maskSum;
-    eigenbackend::computeMaskSum(&mask,maskSum.data());
-    vector<float>& convWorkspace = buffers.convWorkspace;
-
-    computeHandle->eigen_model->apply(
-      computeHandle->eigen_handle,
-      &input,
-      &inputGlobal,
-      &inputMatMulOut,
-      &trunk,
-      &trunkScratch,
-      &regularOut,
-      &regularScratch,
-      &midIn,
-      &midScratch,
-      &gpoolOut,
-      &gpoolOut2,
-      &gpoolConcat,
-      &gpoolBias,
-      &p1Out,
-      &p1Out2,
-      &g1Out,
-      &g1Out2,
-      &g1Concat,
-      &g1Bias,
-      &policyPass,
-      &policy,
-      &v1Out,
-      &v1Out2,
-      &v1Mean,
-      &v2Out,
-      &value,
-      &scoreValue,
-      &ownership,
-      &mask,
-      maskSum.data(),
-      convWorkspace.data()
-    );
-
-    assert(outputs.size() == batchSize);
-
-    float* policyData = policy.data();
-    float* policyPassData = policyPass.data();
-    float* valueData = value.data();
-    float* scoreValueData = scoreValue.data();
-    float* ownershipData = ownership.data();
-
-    for(int row = 0; row < batchSize; row++) {
-      NNOutput* output = outputs[row];
-      assert(output->nnXLen == nnXLen);
-      assert(output->nnYLen == nnYLen);
-
-      const float* policySrcBuf = policyData + row * inputBuffers->singlePolicyResultElts;
-      float* policyProbs = output->policyProbs;
-
-      //These are not actually correct, the client does the postprocessing to turn them into
-      //policy probabilities and white game outcome probabilities
-      //Also we don't fill in the nnHash here either
-      SymmetryHelpers::copyOutputsWithSymmetry(policySrcBuf, policyProbs, 1, nnYLen, nnXLen, symmetry);
-      policyProbs[inputBuffers->singlePolicyResultElts] = policyPassData[row];
-
-      int numValueChannels = computeHandle->eigen_model->numValueChannels;
-      assert(numValueChannels == 3);
-      output->whiteWinProb = valueData[row * numValueChannels];
-      output->whiteLossProb = valueData[row * numValueChannels + 1];
-      output->whiteNoResultProb = valueData[row * numValueChannels + 2];
-
-      //As above, these are NOT actually from white's perspective, but rather the player to move.
-      //As usual the client does the postprocessing.
-      if(output->whiteOwnerMap != NULL) {
-        const float* ownershipSrcBuf = ownershipData + row * nnXLen * nnYLen;
-        assert(computeHandle->eigen_model.numOwnershipChannels == 1);
-        SymmetryHelpers::copyOutputsWithSymmetry(ownershipSrcBuf, output->whiteOwnerMap, 1, nnYLen, nnXLen, symmetry);
-      }
-
-      if(version >= 8) {
-        int numScoreValueChannels = computeHandle->eigen_model->numScoreValueChannels;
-        assert(numScoreValueChannels == 4);
-        output->whiteScoreMean = scoreValueData[row * numScoreValueChannels];
-        output->whiteScoreMeanSq = scoreValueData[row * numScoreValueChannels + 1];
-        output->whiteLead = scoreValueData[row * numScoreValueChannels + 2];
-        output->varTimeLeft = scoreValueData[row * numScoreValueChannels + 3];
-      }
-      else if(version >= 4) {
-        int numScoreValueChannels = computeHandle->eigen_model->numScoreValueChannels;
-        assert(numScoreValueChannels == 2);
-        output->whiteScoreMean = scoreValueData[row * numScoreValueChannels];
-        output->whiteScoreMeanSq = scoreValueData[row * numScoreValueChannels + 1];
-        output->whiteLead = output->whiteScoreMean;
-        output->varTimeLeft = 0;
-      }
-      else if(version >= 3) {
-        int numScoreValueChannels = computeHandle->eigen_model->numScoreValueChannels;
-        assert(numScoreValueChannels == 1);
-        output->whiteScoreMean = scoreValueData[row * numScoreValueChannels];
-        //Version 3 neural nets don't have any second moment output, implicitly already folding it in, so we just use the mean squared
-        output->whiteScoreMeanSq = output->whiteScoreMean * output->whiteScoreMean;
-        output->whiteLead = output->whiteScoreMean;
-        output->varTimeLeft = 0;
-      }
-      else {
-        ASSERT_UNREACHABLE;
-      }
-    }
-    return;
-  }
   // OPENCL
+  if(!EIGEN_FALLBACK) try {
   assert(numBatchEltsFilled <= inputBuffers->maxBatchSize);
   assert(numBatchEltsFilled > 0);
   int batchSize = numBatchEltsFilled;
@@ -4303,7 +4128,180 @@ void NeuralNet::getOutput(
       ASSERT_UNREACHABLE;
     }
   }
+  return;
+  } // not eigen
+  catch(const StringError& err) {
+    gpuHandle->handle->computeContext->logger->write("Error " + string(err.what()) + " while evaluating NN, switching to CPU backend");
+    EIGEN_FALLBACK = true;
+  }
 
+  if(EIGEN_FALLBACK) {
+    auto computeHandle = gpuHandle;
+    assert(numBatchEltsFilled <= inputBuffers->maxBatchSize);
+    assert(numBatchEltsFilled > 0);
+    int batchSize = numBatchEltsFilled;
+    int nnXLen = computeHandle->eigen_context->nnXLen;
+    int nnYLen = computeHandle->eigen_context->nnYLen;
+    int version = computeHandle->eigen_model->version;
+
+    int numSpatialFeatures = NNModelVersion::getNumSpatialFeatures(version);
+    int numGlobalFeatures = NNModelVersion::getNumGlobalFeatures(version);
+    assert(numSpatialFeatures == computeHandle->eigen_model->numInputChannels);
+    assert(numSpatialFeatures * nnXLen * nnYLen == inputBuffers->singleInputElts);
+    assert(numGlobalFeatures == inputBuffers->singleInputGlobalElts);
+
+    for(int nIdx = 0; nIdx<batchSize; nIdx++) {
+      float* rowSpatialInput = inputBuffers->spatialInput.data() + (inputBuffers->singleInputElts * nIdx);
+      float* rowGlobalInput = inputBuffers->globalInput.data() + (inputBuffers->singleInputGlobalElts * nIdx);
+
+      const float* rowGlobal = inputBufs[nIdx]->rowGlobal;
+      const float* rowSpatial = inputBufs[nIdx]->rowSpatial;
+      std::copy(rowGlobal,rowGlobal+numGlobalFeatures,rowGlobalInput);
+      SymmetryHelpers::copyInputsWithSymmetry(rowSpatial, rowSpatialInput, 1, nnYLen, nnXLen, numSpatialFeatures, computeHandle->inputsUseNHWC, symmetry);
+    }
+
+    eigenbackend::Buffers& buffers = *(computeHandle->eigen_buffers);
+
+    CONSTTENSORMAP4 input(inputBuffers->spatialInput.data(), numSpatialFeatures, nnXLen, nnYLen, batchSize);
+    CONSTTENSORMAP2 inputGlobal(inputBuffers->globalInput.data(), numGlobalFeatures, batchSize);
+
+  #define MAP4(NAME) TENSORMAP4 NAME(buffers.NAME.data(), buffers.NAME.dimension(0), buffers.NAME.dimension(1), buffers.NAME.dimension(2), batchSize)
+  #define MAP3(NAME) TENSORMAP3 NAME(buffers.NAME.data(), buffers.NAME.dimension(0), buffers.NAME.dimension(1), batchSize)
+  #define MAP2(NAME) TENSORMAP2 NAME(buffers.NAME.data(), buffers.NAME.dimension(0), batchSize)
+
+    MAP2(inputMatMulOut);
+    MAP4(trunk);
+    MAP4(trunkScratch);
+    MAP4(regularOut);
+    MAP4(regularScratch);
+    MAP4(midIn);
+    MAP4(midScratch);
+    MAP4(gpoolOut);
+    MAP4(gpoolOut2);
+    MAP2(gpoolConcat);
+    MAP2(gpoolBias);
+    MAP4(p1Out);
+    MAP4(p1Out2);
+    MAP4(g1Out);
+    MAP4(g1Out2);
+    MAP2(g1Concat);
+    MAP2(g1Bias);
+    MAP2(policyPass);
+    MAP4(policy);
+    MAP4(v1Out);
+    MAP4(v1Out2);
+    MAP2(v1Mean);
+    MAP2(v2Out);
+    MAP2(value);
+    MAP2(scoreValue);
+    MAP4(ownership);
+    MAP3(mask);
+    vector<float>& maskSum = buffers.maskSum;
+    eigenbackend::computeMaskSum(&mask,maskSum.data());
+    vector<float>& convWorkspace = buffers.convWorkspace;
+
+    computeHandle->eigen_model->apply(
+      computeHandle->eigen_handle,
+      &input,
+      &inputGlobal,
+      &inputMatMulOut,
+      &trunk,
+      &trunkScratch,
+      &regularOut,
+      &regularScratch,
+      &midIn,
+      &midScratch,
+      &gpoolOut,
+      &gpoolOut2,
+      &gpoolConcat,
+      &gpoolBias,
+      &p1Out,
+      &p1Out2,
+      &g1Out,
+      &g1Out2,
+      &g1Concat,
+      &g1Bias,
+      &policyPass,
+      &policy,
+      &v1Out,
+      &v1Out2,
+      &v1Mean,
+      &v2Out,
+      &value,
+      &scoreValue,
+      &ownership,
+      &mask,
+      maskSum.data(),
+      convWorkspace.data()
+    );
+
+    assert(outputs.size() == batchSize);
+
+    float* policyData = policy.data();
+    float* policyPassData = policyPass.data();
+    float* valueData = value.data();
+    float* scoreValueData = scoreValue.data();
+    float* ownershipData = ownership.data();
+
+    for(int row = 0; row < batchSize; row++) {
+      NNOutput* output = outputs[row];
+      assert(output->nnXLen == nnXLen);
+      assert(output->nnYLen == nnYLen);
+
+      const float* policySrcBuf = policyData + row * inputBuffers->singlePolicyResultElts;
+      float* policyProbs = output->policyProbs;
+
+      //These are not actually correct, the client does the postprocessing to turn them into
+      //policy probabilities and white game outcome probabilities
+      //Also we don't fill in the nnHash here either
+      SymmetryHelpers::copyOutputsWithSymmetry(policySrcBuf, policyProbs, 1, nnYLen, nnXLen, symmetry);
+      policyProbs[inputBuffers->singlePolicyResultElts] = policyPassData[row];
+
+      int numValueChannels = computeHandle->eigen_model->numValueChannels;
+      assert(numValueChannels == 3);
+      output->whiteWinProb = valueData[row * numValueChannels];
+      output->whiteLossProb = valueData[row * numValueChannels + 1];
+      output->whiteNoResultProb = valueData[row * numValueChannels + 2];
+
+      //As above, these are NOT actually from white's perspective, but rather the player to move.
+      //As usual the client does the postprocessing.
+      if(output->whiteOwnerMap != NULL) {
+        const float* ownershipSrcBuf = ownershipData + row * nnXLen * nnYLen;
+        assert(computeHandle->eigen_model->numOwnershipChannels == 1);
+        SymmetryHelpers::copyOutputsWithSymmetry(ownershipSrcBuf, output->whiteOwnerMap, 1, nnYLen, nnXLen, symmetry);
+      }
+
+      if(version >= 8) {
+        int numScoreValueChannels = computeHandle->eigen_model->numScoreValueChannels;
+        assert(numScoreValueChannels == 4);
+        output->whiteScoreMean = scoreValueData[row * numScoreValueChannels];
+        output->whiteScoreMeanSq = scoreValueData[row * numScoreValueChannels + 1];
+        output->whiteLead = scoreValueData[row * numScoreValueChannels + 2];
+        output->varTimeLeft = scoreValueData[row * numScoreValueChannels + 3];
+      }
+      else if(version >= 4) {
+        int numScoreValueChannels = computeHandle->eigen_model->numScoreValueChannels;
+        assert(numScoreValueChannels == 2);
+        output->whiteScoreMean = scoreValueData[row * numScoreValueChannels];
+        output->whiteScoreMeanSq = scoreValueData[row * numScoreValueChannels + 1];
+        output->whiteLead = output->whiteScoreMean;
+        output->varTimeLeft = 0;
+      }
+      else if(version >= 3) {
+        int numScoreValueChannels = computeHandle->eigen_model->numScoreValueChannels;
+        assert(numScoreValueChannels == 1);
+        output->whiteScoreMean = scoreValueData[row * numScoreValueChannels];
+        //Version 3 neural nets don't have any second moment output, implicitly already folding it in, so we just use the mean squared
+        output->whiteScoreMeanSq = output->whiteScoreMean * output->whiteScoreMean;
+        output->whiteLead = output->whiteScoreMean;
+        output->varTimeLeft = 0;
+      }
+      else {
+        ASSERT_UNREACHABLE;
+      }
+    }
+    return;
+  }
 }
 
 
