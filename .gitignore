@@ -2,6 +2,9 @@
 .vs
 saved_model*
 .idea
+cpp/build
+cpp/out
+CMakeFiles
 
 *.[oa]
 *.exe

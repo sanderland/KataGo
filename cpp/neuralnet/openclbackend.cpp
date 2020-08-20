@@ -2618,8 +2618,8 @@ struct ConvLayer {
 
       TENSOR4 kernel = TensorMap<const Tensor<const SCALAR, 4>>(desc.weights.data(), convXSize, convYSize, inChannels, outChannels);
       imagePatchSize = convXSize * convYSize * inChannels;
-      Eigen::array<int, 4> dimensionPermutatation({3, 2, 0, 1});
-      Eigen::array<int64_t, 2> newShape({outChannels, imagePatchSize});
+      Eigen::array<Eigen::Index, 4> dimensionPermutatation = {3, 2, 0, 1};
+      Eigen::array<Eigen::Index, 2> newShape = {outChannels, imagePatchSize};
       imagePatchKernel = kernel.shuffle(dimensionPermutatation).reshape(newShape);
     }
   }
