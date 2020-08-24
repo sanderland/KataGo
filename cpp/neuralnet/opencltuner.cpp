@@ -886,31 +886,23 @@ static void tuneXGemmDirect(
     string compileError;
     bool compileSuc = tryCompileProgram(
       "xgemmDirectProgram", context, deviceIdsToUse, OpenCLKernels::xgemmDirect,
-      cfg.xGemmDirect.compileOptions(),
+      cfg.xGemmDirect.compileOptions() + " -DROUTINE_GEMMSTRIDEDBATCHED",
       program, compileError
     );
     if(!compileSuc) { accums.bad = true; accums.detailedErrorMessage = compileError; accums.badErr = CL_BUILD_PROGRAM_FAILURE; return accums; }
-    cl_kernel kernel = clCreateKernel(program, "XgemmDirectBatchedNN", &err);
+    cl_kernel kernel = clCreateKernel(program, "XgemmDirectStridedBatchedNN", &err);
     if(err != 0) { accums.bad = true; accums.badErr = err; return accums; }
 
-    int numTilesX = (nnXLen + cfg.conv3x3.OUTTILE_XSIZE - 1) / cfg.conv3x3.OUTTILE_XSIZE;
-    int numTilesY = (nnYLen + cfg.conv3x3.OUTTILE_YSIZE - 1) / cfg.conv3x3.OUTTILE_YSIZE;
-    int numTilesTotal = batchSize * numTilesX * numTilesY;
-
-    int inTileXSize = cfg.conv3x3.INTILE_XSIZE;
-    int inTileYSize = cfg.conv3x3.INTILE_YSIZE;
-    int inTileXYSize = inTileXSize * inTileYSize;
-
-    int maxChannels = model->maxConvChannels(3,3);
+    int maxChannels = model->maxConvChannels(1,1);
     maxChannels = std::max(model->trunk.trunkNumChannels,maxChannels);
     maxChannels = std::max(model->trunk.midNumChannels,maxChannels);
     maxChannels = std::max(model->trunk.regularNumChannels,maxChannels);
     maxChannels = std::max(model->trunk.gpoolNumChannels,maxChannels);
 
-    int ioNumFloats = numTilesTotal * maxChannels * inTileXYSize;
-    int filterNumFloats = maxChannels * maxChannels * inTileXYSize;
-    cl_mem input = randomReadOnlyBufferFloat("tuneXGemmDirect3x3Input", context, ioNumFloats, 1.0);
-    cl_mem filter = randomReadOnlyBufferFloat("tuneXGemmDirect3x3Filter", context, filterNumFloats, 1.0 / sqrt(maxChannels * 3 * 3));
+    int ioNumFloats = batchSize*nnXLen*nnYLen*maxChannels;
+    int filterNumFloats = maxChannels * maxChannels;
+    cl_mem input = randomReadOnlyBufferFloat("tuneXGemmDirectInput", context, ioNumFloats, 1.0);
+    cl_mem filter = randomReadOnlyBufferFloat("tuneXGemmDirectFilter", context, filterNumFloats, 1.0 / sqrt(maxChannels));
     cl_mem output = createReadWriteBufferFloat(context, ioNumFloats);
 
     const int reps = 6;
@@ -929,14 +921,19 @@ static void tuneXGemmDirect(
       default: ASSERT_UNREACHABLE; break;
       }
 
+      int filterStride = 0; //Reuse same filter for all matrices in batch
+      int inputStride = nnXLen*nnYLen * inChannels;
+      int outputStride = nnXLen*nnYLen * outChannels;
+
       cl_event event;
-      err = doBatchedXGemmDirect_KM_KN_NM(
+      err = doStridedBatchedXGemmDirect_KM_KN_NM(
         kernel,
         commandQueue,
         cfg,
-        numTilesTotal, outChannels, inChannels,
+        nnXLen*nnYLen, outChannels, inChannels,
+        inputStride, filterStride, outputStride,
         input, filter, output,
-        inTileXYSize,
+        batchSize,
         &event
       );
 
@@ -2200,7 +2197,7 @@ void OpenCLTuner::tune(
     bool shouldTestFP16 = testFP16Mode != enabled_t::False;
     //Try FP16 if allowed
     if(!shouldTestFP16) {
-      cout << "Not enabling FP16 for anything since FP16 disabled" << endl;
+      out << "Not enabling FP16 for anything since FP16 disabled" << endl;
     }
     else {
       const double bestKernelsPerSecondFP32Only = bestKernelsPerSecond;
@@ -2235,7 +2232,7 @@ void OpenCLTuner::tune(
         }
         else if(bestKernelsPerSecond16 / FP16_REQUIRED_SPEEDUP < bestKernelsPerSecond) {
           currentConfig = result16;
-          cout << "FP16 tensor cores not significantly faster, not enabling" << endl;
+          out << "FP16 tensor cores not significantly faster, not enabling" << endl;
         }
         else {
           currentConfig = result16;
@@ -2243,7 +2240,7 @@ void OpenCLTuner::tune(
           currentConfig.shouldUseFP16TensorCores = true;
           bestKernelsPerSecond = bestKernelsPerSecond16 / FP16_REQUIRED_SPEEDUP;
           foundGoodFP16 = true;
-          cout << "Enabling FP16 tensor cores due to better performance" << endl;
+          out << "Enabling FP16 tensor cores due to better performance" << endl;
         }
       }
 
@@ -2275,12 +2272,12 @@ void OpenCLTuner::tune(
         }
         else if(bestKernelsPerSecond16 / FP16_REQUIRED_SPEEDUP < bestKernelsPerSecondFP32Only) {
           currentConfig = result16;
-          cout << "FP16 compute not significantly faster, not enabling" << endl;
+          out << "FP16 compute not significantly faster, not enabling" << endl;
         }
         else if(bestKernelsPerSecond16 / FP16_REQUIRED_SPEEDUP < bestKernelsPerSecond) {
           currentConfig = result16;
           currentConfig.shouldUseFP16Compute = true;
-          cout << "FP16 compute not significantly faster than tensor cores, using it generally but using tensor cores for convs" << endl;
+          out << "FP16 compute not significantly faster than tensor cores, using it generally but using tensor cores for convs" << endl;
         }
         else {
           currentConfig = result16;
@@ -2289,7 +2286,7 @@ void OpenCLTuner::tune(
           currentConfig.shouldUseFP16TensorCores = false;
           bestKernelsPerSecond = bestKernelsPerSecond16 / FP16_REQUIRED_SPEEDUP;
           foundGoodFP16 = true;
-          cout << "Enabling FP16 compute due to better performance" << endl;
+          out << "Enabling FP16 compute due to better performance" << endl;
         }
       }
 
@@ -2321,7 +2318,7 @@ void OpenCLTuner::tune(
           out << "FP16 storage tuning failed, assuming no FP16 storage support" << endl;
         }
         else if(bestKernelsPerSecond16 / FP16_REQUIRED_SPEEDUP < bestKernelsPerSecond) {
-          cout << "FP16 storage not significantly faster, not enabling on its own" << endl;
+          out << "FP16 storage not significantly faster, not enabling on its own" << endl;
         }
         else {
           currentConfig = result16;
@@ -2330,7 +2327,7 @@ void OpenCLTuner::tune(
           currentConfig.shouldUseFP16TensorCores = false;
           bestKernelsPerSecond = bestKernelsPerSecond16 / FP16_REQUIRED_SPEEDUP;
           foundGoodFP16 = true;
-          cout << "Enabling FP16 storage due to better performance" << endl;
+          out << "Enabling FP16 storage due to better performance" << endl;
         }
       }
     }

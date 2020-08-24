@@ -77,11 +77,11 @@ int main(int argc, const char* argv[]) {
 
 
 string Version::getKataGoVersion() {
-  return string("1.5.0+kt1.3.5");
+  return string("1.6.0+kt1.4");
 }
 
 string Version::getKataGoVersionForHelp() {
-  return string("KataGo v1.5.0+kt1.3.5 (minified,fasteigen)");
+  return string("KataGo v1.6.0 (Minified version for KaTrain v1.4)");
 }
 
 string Version::getKataGoVersionFullInfo() {
@@ -98,6 +98,11 @@ string Version::getKataGoVersionFullInfo() {
 #else
   out << "Using dummy backend" << endl;
 #endif
+
+#if defined(USE_AVX2)
+  out << "Compiled with AVX2 and FMA instructions" << endl;
+#endif
+
   return out.str();
 }
 

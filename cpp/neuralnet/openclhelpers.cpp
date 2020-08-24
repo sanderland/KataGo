@@ -100,7 +100,7 @@ cl_program OpenCLHelpers::compileProgram(const string& name, cl_context context,
 
   const string opts = options + " -cl-mad-enable -cl-fast-relaxed-math -cl-no-signed-zeros -cl-denorms-are-zero";
 
-  err = clBuildProgram(program, 0, NULL, opts.c_str(), NULL, NULL);
+  err = clBuildProgram(program, devices.size(), devices.data(), opts.c_str(), NULL, NULL);
   if(err != 0) {
     string s;
     s += OpenCLHelpers::getErrorMessage(err) + string("\n");
@@ -458,23 +458,25 @@ DevicesContext::DevicesContext(const vector<DeviceInfo>& allDeviceInfos, const v
     deviceIdsToUse.push_back(allDeviceInfos[gpuIdx].deviceId);
   }
 
+  //Collect all platforms from all the devices we are actually using, with multiplicity
+  //In theory, we should only be making one of these per opencl platform.
+  //In practice, doing this for NVIDIA introduces a false dependency where only one GPU will get
+  //used at a time, each one locking out the others when used. Separate contexts for the same
+  //platform is a workaround.
   for(size_t i = 0; i<gpuIdxsToUse.size(); i++) {
     int gpuIdx = gpuIdxsToUse[i];
     const DeviceInfo& deviceInfo = allDeviceInfos[gpuIdx];
     cl_device_id deviceId = deviceInfo.deviceId;
     cl_platform_id platformId = deviceInfo.platformId;
-    if(!contains(initializedPlatforms,platformId)) {
-      InitializedPlatform* initializedPlatform = new InitializedPlatform();
-      initializedPlatform->platformId = platformId;
-      initializedPlatform->platformDesc = deviceInfo.platformDesc;
-      initializedPlatforms[platformId] = initializedPlatform;
-    }
-    InitializedPlatform* initializedPlatform = initializedPlatforms[platformId];
+    InitializedPlatform* initializedPlatform = new InitializedPlatform();
+    initializedPlatform->platformId = platformId;
+    initializedPlatform->platformDesc = deviceInfo.platformDesc;
     initializedPlatform->deviceIdsToUseForThisPlatform.push_back(deviceId);
+    initializedPlatforms.push_back(initializedPlatform);
   }
 
   for(auto iter = initializedPlatforms.begin(); iter != initializedPlatforms.end(); ++iter) {
-    InitializedPlatform* initializedPlatform = iter->second;
+    InitializedPlatform* initializedPlatform = *iter;
     cl_platform_id platformId = initializedPlatform->platformId;
     initializedPlatform->properties.push_back(CL_CONTEXT_PLATFORM);
     initializedPlatform->properties.push_back((cl_context_properties)platformId);
@@ -504,8 +506,7 @@ DevicesContext::DevicesContext(const vector<DeviceInfo>& allDeviceInfos, const v
     int gpuIdx = gpuIdxsToUse[i];
     const DeviceInfo& deviceInfo = allDeviceInfos[gpuIdx];
     cl_device_id deviceId = deviceInfo.deviceId;
-    cl_platform_id platformId = deviceInfo.platformId;
-    cl_context context = initializedPlatforms[platformId]->context;
+    cl_context context = initializedPlatforms[i]->context;
 
     //TODO - someday, maybe consider CL_QUEUE_OUT_OF_ORDER_EXEC_MODE_ENABLE
     cl_int err;
@@ -550,7 +551,7 @@ DevicesContext::~DevicesContext() {
   }
 
   for(auto iter = initializedPlatforms.begin(); iter != initializedPlatforms.end(); ++iter) {
-    InitializedPlatform* initializedPlatform = iter->second;
+    InitializedPlatform* initializedPlatform = *iter;
     clReleaseContext(initializedPlatform->context);
     delete initializedPlatform;
   }

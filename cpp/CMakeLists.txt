@@ -30,14 +30,16 @@ set_property(CACHE USE_BACKEND PROPERTY STRINGS "" CUDA OPENCL EIGEN)
 
 set(USE_TCMALLOC 0 CACHE BOOL "Use TCMalloc")
 set(NO_GIT_REVISION 0 CACHE BOOL "Disable embedding the git revision into the compiled exe")
+set(Boost_USE_STATIC_LIBS_ON 0 CACHE BOOL "Compile against boost statically instead of dynamically")
+set(USE_AVX2 0 CACHE BOOL "Compile with AVX2")
 
 #--------------------------- NEURAL NET BACKEND ------------------------------------------------------------------------
 
-message("Building 'katago' executable for GTP engine and other tools")
+message(STATUS "Building 'katago' executable for GTP engine and other tools.")
 if(USE_BACKEND STREQUAL "CUDA")
-  message("-DUSE_BACKEND=CUDA, using CUDA backend")
+  message(STATUS "-DUSE_BACKEND=CUDA, using CUDA backend.")
 
-  
+
   # Ensure dynamic cuda linking (Versions prior to 3.17)
   if (${CMAKE_VERSION} VERSION_LESS "3.17")
     set(CMAKE_CUDA_FLAGS "" CACHE STRING "")
@@ -64,7 +66,7 @@ if(USE_BACKEND STREQUAL "CUDA")
   endif()
 
   set(CUDA_STANDARD 11)
-  
+
   # Ensure dynamic cuda linking (Versions from 3.17)
   if (${CMAKE_VERSION} VERSION_GREATER "3.16")
     set(CMAKE_CUDA_RUNTIME_LIBRARY SHARED)
@@ -75,7 +77,7 @@ if(USE_BACKEND STREQUAL "CUDA")
     "-gencode arch=compute_30,code=sm_30 -gencode arch=compute_30,code=compute_30 -gencode arch=compute_37,code=sm_37 -gencode arch=compute_53,code=sm_53 -gencode arch=compute_53,code=compute_53 -gencode arch=compute_70,code=sm_70 -gencode arch=compute_70,code=compute_70"
     )
 elseif(USE_BACKEND STREQUAL "OPENCL")
-  message("-DUSE_BACKEND=OPENCL, using OpenCL backend")
+  message(STATUS "-DUSE_BACKEND=OPENCL, using OpenCL backend.")
   set(NEURALNET_BACKEND_SOURCES
     neuralnet/openclbackend.cpp
     neuralnet/openclkernels.cpp
@@ -83,12 +85,15 @@ elseif(USE_BACKEND STREQUAL "OPENCL")
     neuralnet/opencltuner.cpp
     )
 elseif(USE_BACKEND STREQUAL "EIGEN")
-  message("-DUSE_BACKEND=EIGEN, using Eigen CPU backend")
+  message(STATUS "-DUSE_BACKEND=EIGEN, using Eigen CPU backend.")
+  if(NOT USE_AVX2)
+    message(STATUS "You can also specify USE_AVX2 (-DUSE_AVX2=1 on command line) if you have a modern CPU for better performance.")
+  endif()
   set(NEURALNET_BACKEND_SOURCES
     neuralnet/eigenbackend.cpp
     )
 elseif(USE_BACKEND STREQUAL "")
-  message(WARNING "${ColorBoldRed}WARNING: Using dummy neural net backend, intended for non-neural-net testing only, will fail on any code path requiring a neural net. To use neural net, specify -DUSE_BACKEND=CUDA or -DUSE_BACKEND=OPENCL to compile with the respective backend.${ColorReset}")
+  message(WARNING "${ColorBoldRed}WARNING: Using dummy neural net backend, intended for non-neural-net testing only, will fail on any code path requiring a neural net. To use neural net, specify -DUSE_BACKEND=CUDA or -DUSE_BACKEND=OPENCL or -DUSE_BACKEND=EIGEN to compile with the respective backend.${ColorReset}")
   set(NEURALNET_BACKEND_SOURCES neuralnet/dummybackend.cpp)
 else()
   message(FATAL_ERROR "Unrecognized backend: " ${USE_BACKEND})
@@ -111,11 +116,16 @@ endif()
 #--------------------------- GIT ---------------------------------------------------------------------------------------
 
 if(NO_GIT_REVISION)
-  message("-DNO_GIT_REVISION=1 is set, avoiding including the Git revision in compiled executable")
+  message(STATUS "-DNO_GIT_REVISION=1 is set, avoiding including the Git revision in compiled executable")
   unset(GIT_HEADER_FILE_ALWAYS_UPDATED)
 else()
-  message("Including Git revision in the compiled executable, specify -DNO_GIT_REVISION=1 to disable")
+  message(STATUS "Including Git revision in the compiled executable, specify -DNO_GIT_REVISION=1 to disable")
   find_package(Git)
+  if(NOT GIT_FOUND)
+    set(GIT_EXECUTABLE ${GIT_EXECUTABLE} CACHE FILEPATH "Path to git executable")
+    mark_as_advanced(CLEAR GIT_EXECUTABLE)
+    message(SEND_ERROR "${ColorBoldRed}Git executable was not found. Either specify GIT_EXECUTABLE as the path to the git executable, or use NO_GIT_REVISION to disable.${ColorReset}")
+  endif()
   set(GIT_HEADER_FILE_TEMPLATE_BARE program/gitinfotemplate.h)
   set(GIT_HEADER_FILE_ALWAYS_UPDATED_BARE program/gitinfoupdated.h)
   set(GIT_HEADER_FILE_BARE program/gitinfo.h)
@@ -217,19 +227,40 @@ elseif(USE_BACKEND STREQUAL "OPENCL")
   target_link_libraries (katago ${OpenCL_LIBRARY})
 elseif(USE_BACKEND STREQUAL "EIGEN")
   target_compile_definitions(katago PRIVATE USE_EIGEN_BACKEND)
-  find_package(Eigen3 REQUIRED)
-  include_directories(SYSTEM ${EIGEN3_INCLUDE_DIRS})
-  message("Found Eigen3 at ${EIGEN3_INCLUDE_DIRS}")
+  if(NOT MSVC)
+    find_package(Eigen3 REQUIRED)
+    include_directories(SYSTEM ${EIGEN3_INCLUDE_DIRS})
+    message("Found Eigen3 at ${EIGEN3_INCLUDE_DIRS}")
+  else()
+    if(EIGEN3_INCLUDE_DIRS)
+      message(STATUS "EIGEN3_INCLUDE_DIRS is set to ${EIGEN3_INCLUDE_DIRS}, assuming that Eigen3 header files are here.")
+      include_directories(SYSTEM ${EIGEN3_INCLUDE_DIRS})
+    else()
+      find_package(Eigen3)
+      if(NOT Eigen3_FOUND)
+        set(EIGEN3_INCLUDE_DIRS ${EIGEN3_INCLUDE_DIRS} CACHE PATH "Directory containing 'Eigen' and 'unsupported' subdirs with Eigen headers")
+        message(FATAL_ERROR "*** KataGo: Eigen3 was not found. If you've downloaded Eigen3, you can IGNORE the whole above error from CMake and just set 'EIGEN3_INCLUDE_DIRS' to the root eigen3-3.*.* directory after unzipping it. Among other things it should contain 'Eigen' and 'unsupported' subdirs, which is all KataGo needs. Otherwise, you will need to 'build' Eigen3 even though it is header-only and install it via MSVC in order for cmake to find it via FindEigen3.cmake.")
+      else()
+        include_directories(SYSTEM ${EIGEN3_INCLUDE_DIRS})
+        message("Found Eigen3 at ${EIGEN3_INCLUDE_DIRS}")
+      endif()
+    endif()
+  endif()
 endif()
 
 if(NO_GIT_REVISION)
   target_compile_definitions(katago PRIVATE NO_GIT_REVISION)
 endif()
 
-find_package(ZLIB REQUIRED)
+find_package(ZLIB)
 if(ZLIB_FOUND)
   include_directories(${ZLIB_INCLUDE_DIRS})
   target_link_libraries(katago ${ZLIB_LIBRARIES})
+else()
+  set(ZLIB_INCLUDE_DIR ${ZLIB_INCLUDE_DIR} CACHE PATH "Path to directory with zlib.h and other header files")
+  set(ZLIB_LIBRARY ${ZLIB_LIBRARY} CACHE FILEPATH "Path to 'libz.so' on Linux or 'libz.lib' on Windows")
+  mark_as_advanced(CLEAR ZLIB_INCLUDE_DIR ZLIB_LIBRARY)
+  message(SEND_ERROR "${ColorBoldRed}zlib was not found, if zlib is actually installed but not being found you can set ZLIB_INCLUDE_DIR to the directory with zlib.h and other headers, and ZLIB_LIBRARY to the compiled library 'libz.so' on Linux or 'libz.lib' on Windows. On the command line, this is -DZLIB_INCLUDE_DIR=... and -DZLIB_LIBRARY=... ${ColorReset}")
 endif(ZLIB_FOUND)
 
 target_compile_definitions(katago PRIVATE NO_LIBZIP)
@@ -259,6 +290,11 @@ if(MSVC)
   # core/rand.cpp uses winsock for a gethostname
   target_link_libraries(katago ws2_32)
 
+  if(USE_AVX2)
+    set(CMAKE_CXX_FLAGS  "${CMAKE_CXX_FLAGS} /arch:AVX2 -D__FMA__")
+    target_compile_definitions(katago PRIVATE USE_AVX2)
+  endif()
+
   set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} /STACK:8388608")
 endif()
 
@@ -266,6 +302,10 @@ if(CMAKE_COMPILER_IS_GNUCC)
   if(NOT (${CMAKE_SYSTEM_PROCESSOR} MATCHES "arm"))
     set(CMAKE_CXX_FLAGS  "${CMAKE_CXX_FLAGS} -mfpmath=sse -ffunction-sections  -fdata-sections -flto -Os")
     set(CMAKE_EXE_LINKER_FLAGS  "${CMAKE_EXE_LINKER_FLAGS} -Wl,--gc-sections -flto")
+  endif()
+  if(USE_AVX2)
+    set(CMAKE_CXX_FLAGS  "${CMAKE_CXX_FLAGS} -mavx2 -mfma")
+    target_compile_definitions(katago PRIVATE USE_AVX2)
   endif()
 
   # On g++ it seems like we need to explicitly link threads as well.
