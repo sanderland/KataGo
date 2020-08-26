@@ -5,7 +5,7 @@
       "generator": "Ninja",
       "configurationType": "Release",
       "inheritEnvironments": [ "msvc_x64_x64" ],
-      "buildRoot": "${projectDir}\\build\\${name}",
+      "buildRoot": "${projectDir}\\out\\build\\${name}",
       "installRoot": "${projectDir}\\install\\${name}",
       "cmakeCommandArgs": "",
       "buildCommandArgs": "-v",
@@ -49,7 +49,6 @@
           "value": "C:\\Users\\sande\\Desktop\\work\\eigen-3.3.7",
           "type": "STRING"
         }
-
       ]
     }
   ]

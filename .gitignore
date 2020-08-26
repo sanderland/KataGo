@@ -1,8 +1,10 @@
-cpp/out/
 .vscode
 .vs
 saved_model*
 .idea
+cpp/out/*
+*.exe
+*.ninja
 
 *.[oa]
 *.exe
