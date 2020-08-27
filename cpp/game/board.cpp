@@ -271,6 +271,27 @@ bool Board::isIllegalSuicide(Loc loc, Player pla, bool isMultiStoneSuicideLegal)
   return true;
 }
 
+
+bool Board::isTetrisPlay(Loc loc, Player pla) const {
+  int new_group_size = 1;
+  for(int i = 0; i < 4; i++) {
+    Loc adj = loc + adj_offsets[i];
+    if(colors[adj] == pla) {
+      bool dup = false;
+      for(int j = 0; j < i; j++) {
+        Loc adj_old = loc + adj_offsets[j];
+        if(colors[adj_old] == pla && chain_head[adj_old] == chain_head[adj])
+          dup = true;
+      }
+      if(!dup)
+        new_group_size += chain_data[chain_head[adj]].num_locs;
+    }
+  }
+  //cerr << '[' << loc << ',' << ('0' + pla) << '?' << new_group_size << ']' << endl;
+  return new_group_size == 4;
+}
+
+
 //Returns a fast lower bound on the number of liberties a new stone placed here would have
 void Board::getBoundNumLibertiesAfterPlay(Loc loc, Player pla, int& lowerBound, int& upperBound) const
 {
@@ -415,6 +436,7 @@ bool Board::isLegal(Loc loc, Player pla, bool isMultiStoneSuicideLegal) const
     loc < MAX_ARR_SIZE &&
     (colors[loc] == C_EMPTY) &&
     !isKoBanned(loc) &&
+    !isTetrisPlay(loc,pla) &&
     !isIllegalSuicide(loc, pla, isMultiStoneSuicideLegal)
   );
 }
@@ -427,7 +449,8 @@ bool Board::isLegalIgnoringKo(Loc loc, Player pla, bool isMultiStoneSuicideLegal
   return loc == PASS_LOC || (
     loc >= 0 &&
     loc < MAX_ARR_SIZE &&
-    (colors[loc] == C_EMPTY) &&
+    (colors[loc] == C_EMPTY) && 
+    !isTetrisPlay(loc, pla) &&
     !isIllegalSuicide(loc, pla, isMultiStoneSuicideLegal)
   );
 }

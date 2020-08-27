@@ -167,6 +167,8 @@ struct Board
   bool isIllegalSuicide(Loc loc, Player pla, bool isMultiStoneSuicideLegal) const;
   //Check if moving here is illegal due to simple ko
   bool isKoBanned(Loc loc) const;
+  bool isTetrisPlay(Loc loc, Player pla) const;
+
   //Check if moving here is legal, ignoring simple ko
   bool isLegalIgnoringKo(Loc loc, Player pla, bool isMultiStoneSuicideLegal) const;
   //Check if moving here is legal. Equivalent to isLegalIgnoringKo && !isKoBanned
