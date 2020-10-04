@@ -5,6 +5,7 @@ __pycache__
 *.h5
 *.log
 *.cbp
+.vs
 
 tmp*.txt
 

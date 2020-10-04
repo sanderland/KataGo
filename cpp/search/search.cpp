@@ -25,24 +25,24 @@ NodeStats::~NodeStats()
 {}
 
 double NodeStats::getResultUtilitySum(const SearchParams& searchParams) const {
-  return (
+  return -(
     (2.0*winValueSum - weightSum + noResultValueSum) * searchParams.winLossUtilityFactor +
     noResultValueSum * searchParams.noResultUtilityForWhite
-  );
+  ); // changed sign
 }
 
 double Search::getResultUtility(double winValue, double noResultValue) const {
-  return (
+  return -(
     (2.0*winValue - 1.0 + noResultValue) * searchParams.winLossUtilityFactor +
     noResultValue * searchParams.noResultUtilityForWhite
-  );
+  ); // changed sign
 }
 
 double Search::getResultUtilityFromNN(const NNOutput& nnOutput) const {
-  return (
+  return -(
     (nnOutput.whiteWinProb - nnOutput.whiteLossProb) * searchParams.winLossUtilityFactor +
     nnOutput.whiteNoResultProb * searchParams.noResultUtilityForWhite
-  );
+  ); // changed sign
 }
 
 double Search::getScoreStdev(double scoreMean, double scoreMeanSq) {
