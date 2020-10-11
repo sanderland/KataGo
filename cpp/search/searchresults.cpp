@@ -353,6 +353,8 @@ bool Search::getNodeRawNNValues(const SearchNode& node, ReportedSearchValues& va
   if(winLossValue < -1.0) winLossValue = -1.0;
   values.winLossValue = winLossValue;
 
+  values.visits = 1;
+
   return true;
 }
 
@@ -373,10 +375,12 @@ bool Search::getNodeValues(const SearchNode& node, ReportedSearchValues& values)
   double leadSum = node.stats.leadSum;
   double weightSum = node.stats.weightSum;
   double utilitySum = node.stats.utilitySum;
+  int64_t visits = node.stats.visits;
 
   node.statsLock.clear(std::memory_order_release);
 
-  assert(weightSum > 0.0);
+  if(weightSum <= 0.0)
+    return false;
 
   values.winValue = winValueSum / weightSum;
   values.lossValue = (weightSum - winValueSum - noResultValueSum) / weightSum;
@@ -407,6 +411,7 @@ bool Search::getNodeValues(const SearchNode& node, ReportedSearchValues& values)
   if(winLossValue > 1.0) winLossValue = 1.0;
   if(winLossValue < -1.0) winLossValue = -1.0;
   values.winLossValue = winLossValue;
+  values.visits = visits;
 
   return true;
 }
@@ -534,6 +539,19 @@ bool Search::shouldSuppressPassAlreadyLocked(const SearchNode* n) const {
       return true;
   }
   return false;
+}
+
+bool Search::getPolicy(float policyProbs[NNPos::MAX_NN_POLICY_SIZE]) const {
+  if(rootNode == NULL)
+    return false;
+  std::mutex& mutex = mutexPool->getMutex(rootNode->lockIdx);
+  lock_guard<std::mutex> lock(mutex);
+  if(rootNode->nnOutput == nullptr)
+    return false;
+
+  NNOutput& nnOutput = *(rootNode->nnOutput);
+  std::copy(nnOutput.policyProbs, nnOutput.policyProbs+NNPos::MAX_NN_POLICY_SIZE, policyProbs);
+  return true;
 }
 
 double Search::getPolicySurprise() const {
@@ -1166,11 +1184,13 @@ void Search::printTreeHelper(
 }
 
 
-vector<double> Search::getAverageTreeOwnership(int64_t minVisits) const {
+vector<double> Search::getAverageTreeOwnership(int64_t minVisits, const SearchNode* node) const {
+  if(node == NULL)
+    node = rootNode;
   if(!alwaysIncludeOwnerMap)
     throw StringError("Called Search::getAverageTreeOwnership when alwaysIncludeOwnerMap is false");
   vector<double> vec(nnXLen*nnYLen,0.0);
-  getAverageTreeOwnershipHelper(vec,minVisits,1.0,rootNode);
+  getAverageTreeOwnershipHelper(vec,minVisits,1.0,node);
   return vec;
 }
 

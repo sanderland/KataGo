@@ -477,14 +477,14 @@ void Search::runWholeSearch(Logger& logger, std::atomic<bool>& shouldStopNow) {
 }
 
 void Search::runWholeSearch(Logger& logger, std::atomic<bool>& shouldStopNow, bool pondering) {
-  std::atomic<bool> searchBegun(false);
+  std::function<void()>* searchBegun = NULL;
   runWholeSearch(logger,shouldStopNow,searchBegun,pondering,TimeControls(),1.0);
 }
 
 void Search::runWholeSearch(
   Logger& logger,
   std::atomic<bool>& shouldStopNow,
-  std::atomic<bool>& searchBegun,
+  std::function<void()>* searchBegun,
   bool pondering,
   const TimeControls& tc,
   double searchFactor
@@ -531,7 +531,8 @@ void Search::runWholeSearch(
   }
 
   beginSearch(pondering);
-  searchBegun.store(true,std::memory_order_release);
+  if(searchBegun != NULL)
+    (*searchBegun)();
   int64_t numNonPlayoutVisits = getRootVisits();
 
   auto searchLoop = [this,&timer,&numPlayoutsShared,numNonPlayoutVisits,&logger,&shouldStopNow,maxVisits,maxPlayouts,maxTime](int threadIdx) {
@@ -1210,6 +1211,7 @@ double Search::getEndingWhiteScoreBonus(const SearchNode& parent, const SearchNo
     // * On a spot that the opponent almost surely owns
     // * On a spot that the player almost surely owns and it is not adjacent to opponent stones and is not a connection of non-pass-alive groups.
     //These conditions should still make it so that "cleanup" and dame-filling moves are not discouraged.
+    // * When playing button go, very slightly discourage passing - so that if there are an even number of dame, filling a dame is still favored over passing.
     if(moveLoc != Board::PASS_LOC && rootBoard.ko_loc == Board::NULL_LOC) {
       int pos = NNPos::locToPos(moveLoc,rootBoard.x_size,nnXLen,nnYLen);
       double plaOwnership = rootPla == P_WHITE ? whiteOwnerMap[pos] : -whiteOwnerMap[pos];
@@ -1224,6 +1226,9 @@ double Search::getEndingWhiteScoreBonus(const SearchNode& parent, const SearchNo
           extraRootPoints -= searchParams.rootEndingBonusPoints * ((plaOwnership - extreme) / tail);
         }
       }
+    }
+    if(moveLoc == Board::PASS_LOC && rootHistory.hasButton) {
+      extraRootPoints -= searchParams.rootEndingBonusPoints * 0.5;
     }
   }
   else {

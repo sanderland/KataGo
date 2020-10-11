@@ -77,12 +77,13 @@ int main(int argc, const char* argv[]) {
 
 
 string Version::getKataGoVersion() {
-  return string("1.6.1+kt1.4");
+  return string("1.6.2pre1+kt1.5.1");
 }
 
 string Version::getKataGoVersionForHelp() {
-  return string("KataGo v1.6.1 (Minified version for KaTrain v1.4)");
+  return string("KataGo v1.6.2 pre-release 1 (Minified version for KaTrain v1.5.1)");
 }
+
 
 string Version::getKataGoVersionFullInfo() {
   ostringstream out;

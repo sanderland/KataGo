@@ -594,10 +594,11 @@ static cl_mem createReadWriteBuffer(ComputeHandleInternal* handle, vector<float>
   else
     return createReadWriteBuffer(handle->clContext,data);
 }
-static cl_mem createReadWriteBuffer(ComputeHandleInternal* handle, size_t numElts) {
-  //For the backend we always use this even for FP16, just for simplicity. The buffer might be oversized
-  //on FP16 but that's not a big deal.
-  return createReadWriteBufferFloat(handle->clContext,numElts);
+static cl_mem createReadWriteBuffer(ComputeHandleInternal* handle, size_t numElts, bool useFP16) {
+  if(useFP16)
+    return createReadWriteBufferHalf(handle->clContext,numElts);
+  else
+    return createReadWriteBufferFloat(handle->clContext,numElts);
 }
 
 static void addChannelBiases(ComputeHandleInternal* handle, cl_mem src, cl_mem bias, int ncSize, int nnXYLen) {
@@ -724,6 +725,22 @@ static void debugPrint4D(const string& name, ComputeHandleInternal* handle, cl_m
   cout << "=========================================================" << endl;
 }
 #endif
+
+//--------------------------------------------------------------
+
+struct ConvWorkspaceEltsNeeded {
+  size_t size1;
+  size_t size2;
+  ConvWorkspaceEltsNeeded()
+    :size1(0),size2(0)
+  {}
+  ConvWorkspaceEltsNeeded(size_t s1, size_t s2)
+    :size1(s1),size2(s2)
+  {}
+  static ConvWorkspaceEltsNeeded getMax(ConvWorkspaceEltsNeeded a, ConvWorkspaceEltsNeeded b) {
+    return ConvWorkspaceEltsNeeded(std::max(a.size1,b.size1),std::max(a.size2,b.size2));
+  }
+};
 
 //--------------------------------------------------------------
 
@@ -979,14 +996,15 @@ struct ConvLayer {
     clReleaseMemObject(filter);
   }
 
-  size_t requiredConvWorkspaceElts(ComputeHandleInternal* handle, size_t maxBatchSize) const {
+  ConvWorkspaceEltsNeeded requiredConvWorkspaceElts(ComputeHandleInternal* handle, size_t maxBatchSize) const {
     int numTilesTotalPadded = roundUpToMultiple(maxBatchSize * numTilesX * numTilesY, handle->getXGemmMPaddingMult());
     int outChannelsPadded = roundUpToMultiple(outChannels, handle->getXGemmNPaddingMult());
     int inChannelsPadded = roundUpToMultiple(inChannels, handle->getXGemmKPaddingMult());
     return
-      numTilesTotalPadded *
-      std::max(inChannelsPadded,outChannelsPadded) *
-      inTileXYSize;
+      ConvWorkspaceEltsNeeded(
+        numTilesTotalPadded * inChannelsPadded * inTileXYSize,
+        numTilesTotalPadded * outChannelsPadded * inTileXYSize
+      );
   }
 
   void apply(ComputeHandleInternal* handle, int batchSize, cl_mem input, cl_mem output, cl_mem convWorkspace, cl_mem convWorkspace2) {
@@ -1375,8 +1393,8 @@ struct ResidualBlock {
   ~ResidualBlock() {
   }
 
-  size_t requiredConvWorkspaceElts(ComputeHandleInternal* handle, size_t maxBatchSize) const {
-    return std::max(
+  ConvWorkspaceEltsNeeded requiredConvWorkspaceElts(ComputeHandleInternal* handle, size_t maxBatchSize) const {
+    return ConvWorkspaceEltsNeeded::getMax(
       regularConv.requiredConvWorkspaceElts(handle,maxBatchSize),
       finalConv.requiredConvWorkspaceElts(handle,maxBatchSize)
     );
@@ -1388,7 +1406,6 @@ struct ResidualBlock {
     cl_mem trunk,
     cl_mem trunkScratch,
     cl_mem mid,
-    cl_mem midScratch,
     cl_mem mask,
     cl_mem convWorkspace,
     cl_mem convWorkspace2
@@ -1402,8 +1419,8 @@ struct ResidualBlock {
     if((finalConv.convXSize == 3 && finalConv.convYSize == 3) || (finalConv.convXSize == 5 && finalConv.convYSize == 5))
       finalConv.applyWithBNRelu(handle,&midBN,batchSize,mid,trunkScratch,mask,convWorkspace,convWorkspace2);
     else {
-      midBN.apply(handle,batchSize,true,mid,midScratch,mask);
-      finalConv.apply(handle,batchSize,midScratch,trunkScratch,convWorkspace,convWorkspace2);
+      midBN.apply(handle,batchSize,true,mid,mid,mask);
+      finalConv.apply(handle,batchSize,mid,trunkScratch,convWorkspace,convWorkspace2);
     }
     addPointWise(handle, trunk, trunkScratch, batchSize * finalConv.outChannels * nnYLen * nnXLen);
   }
@@ -1455,11 +1472,11 @@ struct GlobalPoolingResidualBlock {
   ~GlobalPoolingResidualBlock() {
   }
 
-  size_t requiredConvWorkspaceElts(ComputeHandleInternal* handle, size_t maxBatchSize) const {
-    size_t maxElts = 0;
-    maxElts = std::max(maxElts,regularConv.requiredConvWorkspaceElts(handle,maxBatchSize));
-    maxElts = std::max(maxElts,gpoolConv.requiredConvWorkspaceElts(handle,maxBatchSize));
-    maxElts = std::max(maxElts,finalConv.requiredConvWorkspaceElts(handle,maxBatchSize));
+  ConvWorkspaceEltsNeeded requiredConvWorkspaceElts(ComputeHandleInternal* handle, size_t maxBatchSize) const {
+    ConvWorkspaceEltsNeeded maxElts;
+    maxElts = ConvWorkspaceEltsNeeded::getMax(maxElts,regularConv.requiredConvWorkspaceElts(handle,maxBatchSize));
+    maxElts = ConvWorkspaceEltsNeeded::getMax(maxElts,gpoolConv.requiredConvWorkspaceElts(handle,maxBatchSize));
+    maxElts = ConvWorkspaceEltsNeeded::getMax(maxElts,finalConv.requiredConvWorkspaceElts(handle,maxBatchSize));
     return maxElts;
   }
 
@@ -1469,9 +1486,7 @@ struct GlobalPoolingResidualBlock {
     cl_mem trunk,
     cl_mem trunkScratch,
     cl_mem mid,
-    cl_mem midScratch,
     cl_mem gpoolOut,
-    cl_mem gpoolOut2,
     cl_mem gpoolConcat,
     cl_mem gpoolBias,
     cl_mem mask,
@@ -1482,9 +1497,9 @@ struct GlobalPoolingResidualBlock {
     preBN.apply(handle,batchSize,true,trunk,trunkScratch,mask);
     regularConv.apply(handle,batchSize,trunkScratch,mid,convWorkspace,convWorkspace2);
     gpoolConv.apply(handle,batchSize,trunkScratch,gpoolOut,convWorkspace,convWorkspace2);
-    gpoolBN.apply(handle,batchSize,true,gpoolOut,gpoolOut2,mask);
+    gpoolBN.apply(handle,batchSize,true,gpoolOut,gpoolOut,mask);
 
-    performGPool(handle, batchSize, gpoolChannels, nnXYLen, gpoolOut2, gpoolConcat, maskSum);
+    performGPool(handle, batchSize, gpoolChannels, nnXYLen, gpoolOut, gpoolConcat, maskSum);
 
     gpoolToBiasMul.apply(handle,batchSize,gpoolConcat,gpoolBias);
     addChannelBiases(handle, mid, gpoolBias, batchSize * regularChannels, nnXYLen);
@@ -1498,8 +1513,8 @@ struct GlobalPoolingResidualBlock {
     if((finalConv.convXSize == 3 && finalConv.convYSize == 3) || (finalConv.convXSize == 5 && finalConv.convYSize == 5))
       finalConv.applyWithBNRelu(handle,&midBN,batchSize,mid,trunkScratch,mask,convWorkspace,convWorkspace2);
     else {
-      midBN.apply(handle,batchSize,true,mid,midScratch,mask);
-      finalConv.apply(handle,batchSize,midScratch,trunkScratch,convWorkspace,convWorkspace2);
+      midBN.apply(handle,batchSize,true,mid,mid,mask);
+      finalConv.apply(handle,batchSize,mid,trunkScratch,convWorkspace,convWorkspace2);
     }
     addPointWise(handle, trunk, trunkScratch, batchSize * finalConv.outChannels * nnYLen * nnXLen);
   }
@@ -1621,20 +1636,20 @@ struct Trunk {
     delete trunkTipBN;
   }
 
-  size_t requiredConvWorkspaceElts(ComputeHandleInternal* handle) const {
-    size_t maxElts = initialConv->requiredConvWorkspaceElts(handle,maxBatchSize);
+  ConvWorkspaceEltsNeeded requiredConvWorkspaceElts(ComputeHandleInternal* handle) const {
+    ConvWorkspaceEltsNeeded maxElts = initialConv->requiredConvWorkspaceElts(handle,maxBatchSize);
 
     for(int i = 0; i<blocks.size(); i++) {
       if(blocks[i].first == ORDINARY_BLOCK_KIND) {
         ResidualBlock* block = (ResidualBlock*)blocks[i].second;
-        maxElts = std::max(maxElts,block->requiredConvWorkspaceElts(handle,maxBatchSize));
+        maxElts = ConvWorkspaceEltsNeeded::getMax(maxElts,block->requiredConvWorkspaceElts(handle,maxBatchSize));
       }
       else if(blocks[i].first == DILATED_BLOCK_KIND) {
         ASSERT_UNREACHABLE;
       }
       else if(blocks[i].first == GLOBAL_POOLING_BLOCK_KIND) {
         GlobalPoolingResidualBlock* block = (GlobalPoolingResidualBlock*)blocks[i].second;
-        maxElts = std::max(maxElts,block->requiredConvWorkspaceElts(handle,maxBatchSize));
+        maxElts = ConvWorkspaceEltsNeeded::getMax(maxElts,block->requiredConvWorkspaceElts(handle,maxBatchSize));
       }
       else {
         ASSERT_UNREACHABLE;
@@ -1651,9 +1666,7 @@ struct Trunk {
     cl_mem trunk,
     cl_mem trunkScratch,
     cl_mem mid,
-    cl_mem midScratch,
     cl_mem gpoolOut,
-    cl_mem gpoolOut2,
     cl_mem gpoolConcat,
     cl_mem gpoolBias,
     cl_mem mask,
@@ -1662,19 +1675,18 @@ struct Trunk {
     cl_mem convWorkspace2
   ) const {
 
-    //Feed the conv into trunkScratch, not trunk
-    initialConv->apply(handle,batchSize,input,trunkScratch,convWorkspace,convWorkspace2);
+    initialConv->apply(handle,batchSize,input,trunk,convWorkspace,convWorkspace2);
 
     #ifdef DEBUG_INTERMEDIATE_VALUES
     bool usingNHWC = false;
     debugPrint4D(string("Initial bin features"), handle, input, batchSize, initialConv->inChannels, nnXLen, nnYLen, usingNHWC);
-    debugPrint4D(string("After initial conv"), handle, trunkScratch, batchSize, trunkNumChannels, nnXLen, nnYLen, usingNHWC);
+    debugPrint4D(string("After initial conv"), handle, trunk, batchSize, trunkNumChannels, nnXLen, nnYLen, usingNHWC);
     #endif
 
-    //Feed the matmul into trunk, which will certainly be a big enough buffer
-    initialMatMul->apply(handle,batchSize,inputGlobal,trunk);
-    //Then accumulate it into trunkScratch, broadcasting during the process
-    addChannelBiases(handle, trunkScratch, trunk, batchSize * trunkNumChannels, nnXLen*nnYLen);
+    //Feed the matmul into trunkScratch, which will certainly be a big enough buffer
+    initialMatMul->apply(handle,batchSize,inputGlobal,trunkScratch);
+    //Then accumulate it into trunk, broadcasting during the process
+    addChannelBiases(handle, trunk, trunkScratch, batchSize * trunkNumChannels, nnXLen*nnYLen);
 
     for(int i = 0; i<blocks.size(); i++) {
       #ifdef DEBUG_INTERMEDIATE_VALUES
@@ -1686,10 +1698,9 @@ struct Trunk {
         block->apply(
           handle,
           batchSize,
-          trunkScratch, //Flip trunk and trunkScratch so that the result gets accumulated in trunkScratch
           trunk,
+          trunkScratch,
           mid,
-          midScratch,
           mask,
           convWorkspace,
           convWorkspace2
@@ -1703,12 +1714,10 @@ struct Trunk {
         block->apply(
           handle,
           batchSize,
-          trunkScratch, //Flip trunk and trunkScratch so that the result gets accumulated in trunkScratch
           trunk,
+          trunkScratch,
           mid,
-          midScratch,
           gpoolOut,
-          gpoolOut2,
           gpoolConcat,
           gpoolBias,
           mask,
@@ -1723,9 +1732,8 @@ struct Trunk {
 
     }
 
-    //And now with the final BN port it from trunkScratch to trunk.
     bool applyBNRelu = true;
-    trunkTipBN->apply(handle,batchSize,applyBNRelu,trunkScratch,trunk,mask);
+    trunkTipBN->apply(handle,batchSize,applyBNRelu,trunk,trunk,mask);
 
     #ifdef DEBUG_INTERMEDIATE_VALUES
     debugPrint4D(string("Trunk tip"), handle, trunk, batchSize, trunkNumChannels, nnXLen, nnYLen, usingNHWC);
@@ -1792,11 +1800,11 @@ struct PolicyHead {
     delete gpoolToPassMul;
   }
 
-  size_t requiredConvWorkspaceElts(ComputeHandleInternal* handle, size_t maxBatchSize) const {
-    size_t maxElts = 0;
-    maxElts = std::max(maxElts,p1Conv->requiredConvWorkspaceElts(handle,maxBatchSize));
-    maxElts = std::max(maxElts,g1Conv->requiredConvWorkspaceElts(handle,maxBatchSize));
-    maxElts = std::max(maxElts,p2Conv->requiredConvWorkspaceElts(handle,maxBatchSize));
+  ConvWorkspaceEltsNeeded requiredConvWorkspaceElts(ComputeHandleInternal* handle, size_t maxBatchSize) const {
+    ConvWorkspaceEltsNeeded maxElts;
+    maxElts = ConvWorkspaceEltsNeeded::getMax(maxElts,p1Conv->requiredConvWorkspaceElts(handle,maxBatchSize));
+    maxElts = ConvWorkspaceEltsNeeded::getMax(maxElts,g1Conv->requiredConvWorkspaceElts(handle,maxBatchSize));
+    maxElts = ConvWorkspaceEltsNeeded::getMax(maxElts,p2Conv->requiredConvWorkspaceElts(handle,maxBatchSize));
     return maxElts;
   }
 
@@ -1807,9 +1815,7 @@ struct PolicyHead {
     cl_mem maskSum,
     cl_mem trunk,
     cl_mem p1Out,
-    cl_mem p1Out2,
     cl_mem gpoolOut,
-    cl_mem gpoolOut2,
     cl_mem gpoolConcat,
     cl_mem gpoolBias,
     cl_mem policyPass,
@@ -1821,9 +1827,9 @@ struct PolicyHead {
     bool applyBNRelu = true;
     p1Conv->apply(handle,batchSize,trunk,p1Out,convWorkspace,convWorkspace2);
     g1Conv->apply(handle,batchSize,trunk,gpoolOut,convWorkspace,convWorkspace2);
-    g1BN->apply(handle,batchSize,applyBNRelu,gpoolOut,gpoolOut2,mask);
+    g1BN->apply(handle,batchSize,applyBNRelu,gpoolOut,gpoolOut,mask);
 
-    performGPool(handle, batchSize, g1Channels, nnXLen*nnYLen, gpoolOut2, gpoolConcat, maskSum);
+    performGPool(handle, batchSize, g1Channels, nnXLen*nnYLen, gpoolOut, gpoolConcat, maskSum);
 
     gpoolToBiasMul->apply(handle,batchSize,gpoolConcat,gpoolBias);
 
@@ -1835,15 +1841,10 @@ struct PolicyHead {
     debugPrint2D(string("g1 biases"), handle, gpoolBias, batchSize, p1Channels);
     #endif
 
-    cl_mem p1OutA;
-    cl_mem p1OutB;
-    p1OutA = p1Out;
-    p1OutB = p1Out2;
+    addChannelBiases(handle, p1Out, gpoolBias, batchSize * p1Channels, nnXLen*nnYLen);
 
-    addChannelBiases(handle, p1OutA, gpoolBias, batchSize * p1Channels, nnXLen*nnYLen);
-
-    p1BN->apply(handle,batchSize,true,p1OutA,p1OutB,mask);
-    p2Conv->apply(handle,batchSize,p1OutB,policy,convWorkspace,convWorkspace2);
+    p1BN->apply(handle,batchSize,true,p1Out,p1Out,mask);
+    p2Conv->apply(handle,batchSize,p1Out,policy,convWorkspace,convWorkspace2);
     gpoolToPassMul->apply(handle,batchSize,gpoolConcat,policyPass);
 
     #ifdef DEBUG_INTERMEDIATE_VALUES
@@ -1923,10 +1924,10 @@ struct ValueHead {
     delete vOwnershipConv;
   }
 
-  size_t requiredConvWorkspaceElts(ComputeHandleInternal* handle, size_t maxBatchSize) const {
-    size_t maxElts = 0;
-    maxElts = std::max(maxElts,v1Conv->requiredConvWorkspaceElts(handle,maxBatchSize));
-    maxElts = std::max(maxElts,vOwnershipConv->requiredConvWorkspaceElts(handle,maxBatchSize));
+  ConvWorkspaceEltsNeeded requiredConvWorkspaceElts(ComputeHandleInternal* handle, size_t maxBatchSize) const {
+    ConvWorkspaceEltsNeeded maxElts;
+    maxElts = ConvWorkspaceEltsNeeded::getMax(maxElts,v1Conv->requiredConvWorkspaceElts(handle,maxBatchSize));
+    maxElts = ConvWorkspaceEltsNeeded::getMax(maxElts,vOwnershipConv->requiredConvWorkspaceElts(handle,maxBatchSize));
     return maxElts;
   }
 
@@ -1937,7 +1938,6 @@ struct ValueHead {
     cl_mem maskSum,
     cl_mem trunk,
     cl_mem v1Out,
-    cl_mem v1Out2,
     cl_mem v1Mean,
     cl_mem v2Out,
     cl_mem value,
@@ -1949,9 +1949,9 @@ struct ValueHead {
 
     bool applyBNRelu = true;
     v1Conv->apply(handle,batchSize,trunk,v1Out,convWorkspace,convWorkspace2);
-    v1BN->apply(handle,batchSize,applyBNRelu,v1Out,v1Out2,mask);
+    v1BN->apply(handle,batchSize,applyBNRelu,v1Out,v1Out,mask);
 
-    performValueHeadPool(handle, batchSize, v1Channels, nnXLen*nnYLen, v1Out2, v1Mean, maskSum);
+    performValueHeadPool(handle, batchSize, v1Channels, nnXLen*nnYLen, v1Out, v1Mean, maskSum);
 
     v2Mul->apply(handle,batchSize,v1Mean,v2Out);
     v2Bias->apply(handle,batchSize,true,v2Out);
@@ -1968,7 +1968,7 @@ struct ValueHead {
     debugPrint2D(string("v2"), handle, v2Out, batchSize, v1Channels);
     #endif
 
-    vOwnershipConv->apply(handle,batchSize,v1Out2,ownership,convWorkspace,convWorkspace2);
+    vOwnershipConv->apply(handle,batchSize,v1Out,ownership,convWorkspace,convWorkspace2);
   }
 
 };
@@ -2083,11 +2083,11 @@ struct Model {
   }
 
 
-  size_t requiredConvWorkspaceElts(ComputeHandleInternal* handle) const {
-    size_t maxElts = 0;
-    maxElts = std::max(maxElts,trunk->requiredConvWorkspaceElts(handle));
-    maxElts = std::max(maxElts,policyHead->requiredConvWorkspaceElts(handle,maxBatchSize));
-    maxElts = std::max(maxElts,valueHead->requiredConvWorkspaceElts(handle,maxBatchSize));
+  ConvWorkspaceEltsNeeded requiredConvWorkspaceElts(ComputeHandleInternal* handle) const {
+    ConvWorkspaceEltsNeeded maxElts;
+    maxElts = ConvWorkspaceEltsNeeded::getMax(maxElts,trunk->requiredConvWorkspaceElts(handle));
+    maxElts = ConvWorkspaceEltsNeeded::getMax(maxElts,policyHead->requiredConvWorkspaceElts(handle,maxBatchSize));
+    maxElts = ConvWorkspaceEltsNeeded::getMax(maxElts,valueHead->requiredConvWorkspaceElts(handle,maxBatchSize));
     return maxElts;
   }
 
@@ -2103,19 +2103,15 @@ struct Model {
     cl_mem trunkBuf,
     cl_mem trunkScratch,
     cl_mem mid,
-    cl_mem midScratch,
     cl_mem gpoolOut,
-    cl_mem gpoolOut2,
     cl_mem gpoolConcat,
     cl_mem gpoolBias,
 
     cl_mem p1Out,
-    cl_mem p1Out2,
     cl_mem policyPass,
     cl_mem policy,
 
     cl_mem v1Out,
-    cl_mem v1Out2,
     cl_mem v1Mean,
     cl_mem v2Out,
     cl_mem value,
@@ -2158,9 +2154,7 @@ struct Model {
       trunkBuf,
       trunkScratch,
       mid,
-      midScratch,
       gpoolOut,
-      gpoolOut2,
       gpoolConcat,
       gpoolBias,
       mask,
@@ -2175,9 +2169,7 @@ struct Model {
       maskSum,
       trunkBuf,
       p1Out,
-      p1Out2,
       gpoolOut,
-      gpoolOut2,
       gpoolConcat,
       gpoolBias,
       policyPass,
@@ -2192,7 +2184,6 @@ struct Model {
       maskSum,
       trunkBuf,
       v1Out,
-      v1Out2,
       v1Mean,
       v2Out,
       value,
@@ -2219,21 +2210,17 @@ struct Buffers {
   cl_mem trunk;
   cl_mem trunkScratch;
   cl_mem mid;
-  cl_mem midScratch;
   cl_mem gpoolOut;
-  cl_mem gpoolOut2;
   cl_mem gpoolConcat;
   cl_mem gpoolBias;
 
   cl_mem p1Out;
-  cl_mem p1Out2;
   cl_mem policyPass;
   cl_mem policy;
   size_t policyPassElts;
   size_t policyElts;
 
   cl_mem v1Out;
-  cl_mem v1Out2;
   cl_mem v1Mean;
   cl_mem v2Out;
   cl_mem value;
@@ -2254,51 +2241,49 @@ struct Buffers {
     size_t batchXYElts = (size_t)m.maxBatchSize * m.nnXLen * m.nnYLen;
     size_t batchElts = (size_t)m.maxBatchSize;
 
+    bool useFP16 = handle->usingFP16Storage;
+
     inputElts = m.numInputChannels * batchXYElts;
     inputGlobalElts = m.numInputGlobalChannels * batchElts;
 
-    input = createReadWriteBuffer(handle, inputElts);
-    inputGlobal = createReadWriteBuffer(handle, inputGlobalElts);
+    input = createReadWriteBuffer(handle, inputElts, useFP16);
+    inputGlobal = createReadWriteBuffer(handle, inputGlobalElts, false);
 
-    mask = createReadWriteBuffer(handle, batchXYElts);
-    maskSum = createReadWriteBuffer(handle, batchElts);
+    mask = createReadWriteBuffer(handle, batchXYElts, useFP16);
+    maskSum = createReadWriteBuffer(handle, batchElts, false);
 
-    trunk = createReadWriteBuffer(handle, m.trunk->trunkNumChannels * batchXYElts);
-    trunkScratch = createReadWriteBuffer(handle, m.trunk->trunkNumChannels * batchXYElts);
+    trunk = createReadWriteBuffer(handle, m.trunk->trunkNumChannels * batchXYElts, useFP16);
+    trunkScratch = createReadWriteBuffer(handle, m.trunk->trunkNumChannels * batchXYElts, useFP16);
     size_t maxMidChannels = std::max(m.trunk->regularNumChannels + m.trunk->dilatedNumChannels, m.trunk->midNumChannels);
-    mid = createReadWriteBuffer(handle, maxMidChannels * batchXYElts);
-    midScratch = createReadWriteBuffer(handle, maxMidChannels * batchXYElts);
+    mid = createReadWriteBuffer(handle, maxMidChannels * batchXYElts, useFP16);
     size_t maxGPoolChannels = std::max(m.trunk->gpoolNumChannels, m.policyHead->g1Channels);
-    gpoolOut = createReadWriteBuffer(handle, maxGPoolChannels * batchXYElts);
-    gpoolOut2 = createReadWriteBuffer(handle, maxGPoolChannels * batchXYElts);
-    gpoolConcat = createReadWriteBuffer(handle, maxGPoolChannels * batchElts * 3);
-    gpoolBias = createReadWriteBuffer(handle, maxMidChannels * batchElts);
+    gpoolOut = createReadWriteBuffer(handle, maxGPoolChannels * batchXYElts, false);
+    gpoolConcat = createReadWriteBuffer(handle, maxGPoolChannels * batchElts * 3, false);
+    gpoolBias = createReadWriteBuffer(handle, maxMidChannels * batchElts, false);
 
-    p1Out = createReadWriteBuffer(handle, m.policyHead->p1Channels * batchXYElts);
-    p1Out2 = createReadWriteBuffer(handle, m.policyHead->p1Channels * batchXYElts);
+    p1Out = createReadWriteBuffer(handle, m.policyHead->p1Channels * batchXYElts, useFP16);
     policyPassElts = m.policyHead->p2Channels * batchElts;
-    policyPass = createReadWriteBuffer(handle, policyPassElts);
+    policyPass = createReadWriteBuffer(handle, policyPassElts, false);
     policyElts = m.policyHead->p2Channels * batchXYElts;
-    policy = createReadWriteBuffer(handle, policyElts);
+    policy = createReadWriteBuffer(handle, policyElts, useFP16);
     assert(m.policyHead->p2Channels == 1);
 
-    v1Out = createReadWriteBuffer(handle, m.valueHead->v1Channels * batchXYElts);
-    v1Out2 = createReadWriteBuffer(handle, m.valueHead->v1Channels * batchXYElts);
-    v1Mean = createReadWriteBuffer(handle, m.valueHead->v1Channels * 3 * batchElts);
-    v2Out = createReadWriteBuffer(handle, m.valueHead->v2Channels * batchElts);
+    v1Out = createReadWriteBuffer(handle, m.valueHead->v1Channels * batchXYElts, useFP16);
+    v1Mean = createReadWriteBuffer(handle, m.valueHead->v1Channels * 3 * batchElts, false);
+    v2Out = createReadWriteBuffer(handle, m.valueHead->v2Channels * batchElts, false);
 
     valueElts = m.valueHead->valueChannels * batchElts;
-    value = createReadWriteBuffer(handle, valueElts);
+    value = createReadWriteBuffer(handle, valueElts, false);
 
     scoreValueElts = m.valueHead->scoreValueChannels * batchElts;
-    scoreValue = createReadWriteBuffer(handle, scoreValueElts);
+    scoreValue = createReadWriteBuffer(handle, scoreValueElts, false);
 
     ownershipElts = m.valueHead->ownershipChannels * batchXYElts;
-    ownership = createReadWriteBuffer(handle, ownershipElts);
+    ownership = createReadWriteBuffer(handle, ownershipElts, useFP16);
 
-    size_t convWorkspaceElts = m.requiredConvWorkspaceElts(handle);
-    convWorkspace = createReadWriteBuffer(handle, convWorkspaceElts);
-    convWorkspace2 = createReadWriteBuffer(handle, convWorkspaceElts);
+    ConvWorkspaceEltsNeeded convWorkspaceElts = m.requiredConvWorkspaceElts(handle);
+    convWorkspace = createReadWriteBuffer(handle, convWorkspaceElts.size1, useFP16);
+    convWorkspace2 = createReadWriteBuffer(handle, convWorkspaceElts.size2, useFP16);
   }
 
   ~Buffers() {
@@ -2311,19 +2296,15 @@ struct Buffers {
     clReleaseMemObject(trunk);
     clReleaseMemObject(trunkScratch);
     clReleaseMemObject(mid);
-    clReleaseMemObject(midScratch);
     clReleaseMemObject(gpoolOut);
-    clReleaseMemObject(gpoolOut2);
     clReleaseMemObject(gpoolConcat);
     clReleaseMemObject(gpoolBias);
 
     clReleaseMemObject(p1Out);
-    clReleaseMemObject(p1Out2);
     clReleaseMemObject(policyPass);
     clReleaseMemObject(policy);
 
     clReleaseMemObject(v1Out);
-    clReleaseMemObject(v1Out2);
     clReleaseMemObject(v1Mean);
     clReleaseMemObject(v2Out);
     clReleaseMemObject(value);
@@ -2642,19 +2623,15 @@ void NeuralNet::getOutput(
     buffers->trunk,
     buffers->trunkScratch,
     buffers->mid,
-    buffers->midScratch,
     buffers->gpoolOut,
-    buffers->gpoolOut2,
     buffers->gpoolConcat,
     buffers->gpoolBias,
 
     buffers->p1Out,
-    buffers->p1Out2,
     buffers->policyPass,
     buffers->policy,
 
     buffers->v1Out,
-    buffers->v1Out2,
     buffers->v1Mean,
     buffers->v2Out,
     buffers->value,
@@ -2838,9 +2815,9 @@ bool NeuralNet::testEvaluateConv(
 
   vector<float> inputTmp = inputBuffer;
   cl_mem input = createReadOnlyBuffer(handle,inputTmp,useFP16);
-  size_t convWorkspaceElts = layer->requiredConvWorkspaceElts(handle,batchSize);
-  cl_mem convWorkspace = createReadWriteBuffer(handle, convWorkspaceElts);
-  cl_mem convWorkspace2 = createReadWriteBuffer(handle, convWorkspaceElts);
+  ConvWorkspaceEltsNeeded convWorkspaceElts = layer->requiredConvWorkspaceElts(handle,batchSize);
+  cl_mem convWorkspace = createReadWriteBuffer(handle, convWorkspaceElts.size1, useFP16);
+  cl_mem convWorkspace2 = createReadWriteBuffer(handle, convWorkspaceElts.size2, useFP16);
 
   cl_mem output = clCreateBuffer(handle->clContext, CL_MEM_READ_WRITE, byteSizeofVectorContents(outputBuffer), NULL, &err);
   CHECK_ERR(err);
@@ -2946,15 +2923,14 @@ bool NeuralNet::testEvaluateResidualBlock(
   vector<float> maskTmp = maskBuffer;
   cl_mem trunk = createReadWriteBuffer(handle,inputTmp,useFP16);
   cl_mem mask = createReadOnlyBuffer(handle,maskTmp,useFP16);
-  cl_mem trunkScratch = createReadWriteBuffer(handle,numTrunkFloats);
-  cl_mem mid = createReadWriteBuffer(handle,numMidFloats);
-  cl_mem midScratch = createReadWriteBuffer(handle,numMidFloats);
+  cl_mem trunkScratch = createReadWriteBuffer(handle,numTrunkFloats,useFP16);
+  cl_mem mid = createReadWriteBuffer(handle,numMidFloats,useFP16);
 
-  size_t convWorkspaceElts = layer->requiredConvWorkspaceElts(handle,batchSize);
-  cl_mem convWorkspace = createReadWriteBuffer(handle, convWorkspaceElts);
-  cl_mem convWorkspace2 = createReadWriteBuffer(handle, convWorkspaceElts);
+  ConvWorkspaceEltsNeeded convWorkspaceElts = layer->requiredConvWorkspaceElts(handle,batchSize);
+  cl_mem convWorkspace = createReadWriteBuffer(handle, convWorkspaceElts.size1, useFP16);
+  cl_mem convWorkspace2 = createReadWriteBuffer(handle, convWorkspaceElts.size2, useFP16);
 
-  layer->apply(handle, batchSize, trunk, trunkScratch, mid, midScratch, mask, convWorkspace, convWorkspace2);
+  layer->apply(handle, batchSize, trunk, trunkScratch, mid, mask, convWorkspace, convWorkspace2);
 
   blockingReadBuffer(handle->commandQueue, trunk, numTrunkFloats, outputBuffer, useFP16);
 
@@ -2962,7 +2938,6 @@ bool NeuralNet::testEvaluateResidualBlock(
   clReleaseMemObject(mask);
   clReleaseMemObject(trunkScratch);
   clReleaseMemObject(mid);
-  clReleaseMemObject(midScratch);
   clReleaseMemObject(convWorkspace);
   clReleaseMemObject(convWorkspace2);
   delete layer;
@@ -3012,18 +2987,16 @@ bool NeuralNet::testEvaluateGlobalPoolingResidualBlock(
   vector<float> maskTmp = maskBuffer;
   cl_mem trunk = createReadWriteBuffer(handle,inputTmp,useFP16);
   cl_mem mask = createReadOnlyBuffer(handle,maskTmp,useFP16);
-  cl_mem maskSum = createReadWriteBuffer(handle,numMaskSumFloats);
-  cl_mem trunkScratch = createReadWriteBuffer(handle,numTrunkFloats);
-  cl_mem mid = createReadWriteBuffer(handle,numMidFloats);
-  cl_mem midScratch = createReadWriteBuffer(handle,numMidFloats);
-  cl_mem gpoolOut = createReadWriteBuffer(handle,numGPoolOutFloats);
-  cl_mem gpoolOut2 = createReadWriteBuffer(handle,numGPoolOutFloats);
-  cl_mem gpoolConcat = createReadWriteBuffer(handle,numGPoolConcatFloats);
-  cl_mem gpoolBias = createReadWriteBuffer(handle,numGPoolBiasFloats);
+  cl_mem maskSum = createReadWriteBuffer(handle,numMaskSumFloats,false);
+  cl_mem trunkScratch = createReadWriteBuffer(handle,numTrunkFloats,useFP16);
+  cl_mem mid = createReadWriteBuffer(handle,numMidFloats,useFP16);
+  cl_mem gpoolOut = createReadWriteBuffer(handle,numGPoolOutFloats,false);
+  cl_mem gpoolConcat = createReadWriteBuffer(handle,numGPoolConcatFloats,false);
+  cl_mem gpoolBias = createReadWriteBuffer(handle,numGPoolBiasFloats,false);
 
-  size_t convWorkspaceElts = layer->requiredConvWorkspaceElts(handle,batchSize);
-  cl_mem convWorkspace = createReadWriteBuffer(handle, convWorkspaceElts);
-  cl_mem convWorkspace2 = createReadWriteBuffer(handle, convWorkspaceElts);
+  ConvWorkspaceEltsNeeded convWorkspaceElts = layer->requiredConvWorkspaceElts(handle,batchSize);
+  cl_mem convWorkspace = createReadWriteBuffer(handle, convWorkspaceElts.size1, useFP16);
+  cl_mem convWorkspace2 = createReadWriteBuffer(handle, convWorkspaceElts.size2, useFP16);
 
   computeMaskSums(handle,mask,maskSum,batchSize,nnXLen,nnYLen);
 
@@ -3033,9 +3006,7 @@ bool NeuralNet::testEvaluateGlobalPoolingResidualBlock(
     trunk,
     trunkScratch,
     mid,
-    midScratch,
     gpoolOut,
-    gpoolOut2,
     gpoolConcat,
     gpoolBias,
     mask,
@@ -3051,9 +3022,7 @@ bool NeuralNet::testEvaluateGlobalPoolingResidualBlock(
   clReleaseMemObject(maskSum);
   clReleaseMemObject(trunkScratch);
   clReleaseMemObject(mid);
-  clReleaseMemObject(midScratch);
   clReleaseMemObject(gpoolOut);
-  clReleaseMemObject(gpoolOut2);
   clReleaseMemObject(gpoolConcat);
   clReleaseMemObject(gpoolBias);
   clReleaseMemObject(convWorkspace);

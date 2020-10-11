@@ -182,7 +182,7 @@ KataGo currently officially supports both Windows and Linux, with [precompiled e
 ### MacOS
 The community also provides KataGo packages for [Homebrew](https://brew.sh) on MacOS - releases there may lag behind official releases slightly.
 
-Use `brew install katago`. The latest config files and networks are installed in KataGo's `share` directory. Find them via `brew list --verbose katago`. A basic way to run katago will be `katago gtp -config $(brew list --verbose katago | grep gtp) -model $(brew list --verbose katago | grep .gz | head -1)`. You should choose the Network according to the release notes here and customize the provided example config as with every other way of installing KataGo.
+Use `brew install katago`. The latest config files and networks are installed in KataGo's `share` directory. Find them via `brew list --verbose katago`. A basic way to run katago will be `katago gtp -config $(brew list --verbose katago | grep gtp*.cfg) -model $(brew list --verbose katago | grep .gz | head -1)`. You should choose the Network according to the release notes here and customize the provided example config as with every other way of installing KataGo.
 
 ### OpenCL vs CUDA vs Eigen
 KataGo has three backends, OpenCL (GPU), CUDA (GPU), and Eigen (CPU).
@@ -282,6 +282,9 @@ then you are using the Mesa drivers. You will need to change your drivers, see f
      * Edit KataGo's config (`default_gtp.cfg` or `gtp_example.cfg` or `gtp.cfg`, or whatever you've named it) to use `rules=japanese` or `rules=chinese` or whatever you need, or set the individual rules `koRule`,`scoringRule`,`taxRule`, etc. to what they should be. See [here](https://github.com/lightvector/KataGo/blob/master/cpp/configs/gtp_example.cfg#L91) for where this is in the config, or and see [this webpage](https://lightvector.github.io/KataGo/rules.html) for the full description of KataGo's ruleset.
      * Use the `genconfig` command (`./katago genconfig -model <NEURALNET>.gz -output <PATH_TO_SAVE_GTP_CONFIG>.cfg`) to generate a config, and it will interactively help you, including asking you for what default rules you want.
      * If your GUI allows access directly to the GTP console (for example, press `E` in Lizzie), then you can run `kata-set-rules japanese` or similar for other rules directly in the GTP console, to change the rules dynamically in the middle of a game or an analysis session.
+
+* **How do I make KataGo show me a wider range of possible good moves and options during analysis?**
+   * Add `analysisWideRootNoise = X` to the config (`default_gtp.cfg` or `gtp_example.cfg` or `gtp.cfg`, or whatever you've named it). A value of 0.03 will mildly widen the range of moves that get searched and evaluated. A value of 0.10 will very noticeably widen the search. Much larger values will start pushing KataGo toward evaluating every move on the board, at the cost of evaluating the best moves less thoroughly. You can play with this parameter to see what you prefer. You can *also* change it at runtime by typing `kata-set-param analysisWideRootNoise X` into the GTP console, if your GUI program exposes the GTP console for you to provide direct commands.
 
 * **Which model/network should I use?**
    * For weaker or mid-range GPUs, try the final 20-block network from [here](https://github.com/lightvector/KataGo/releases/tag/v1.4.5), which is the best of its size.
