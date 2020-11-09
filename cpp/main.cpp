@@ -21,9 +21,53 @@ static void printHelp(int argc, const char* argv[]) {
   cout << endl;
 
   cout << R"%%(
+<<<<<<< HEAD
   This version is a minified katago which only includes:
     analysis : Runs an engine designed to analyze entire games in parallel.
     version : Show version info.
+=======
+---Common subcommands------------------
+
+gtp : Runs GTP engine that can be plugged into any standard Go GUI for play/analysis.
+benchmark : Test speed with different numbers of search threads.
+genconfig : User-friendly interface to generate a config with rules and automatic performance tuning.
+
+contribute : Connect to online distributed KataGo training and run perpetually contributing selfplay games.
+
+match : Run self-play match games based on a config, more efficient than gtp due to batching.
+version : Print version and exit.
+
+analysis : Runs an engine designed to analyze entire games in parallel.
+tuner : (OpenCL only) Run tuning to find and optimize parameters that work on your GPU.
+
+---Selfplay training subcommands---------
+
+selfplay : Play selfplay games and generate training data.
+gatekeeper : Poll directory for new nets and match them against the latest net so far.
+
+---Testing/debugging subcommands-------------
+evalsgf : Utility/debug tool, analyze a single position of a game from an SGF file.
+
+runtests : Test important board algorithms and datastructures
+runnnlayertests : Test a few subcomponents of the current neural net backend
+
+runnnontinyboardtest : Run neural net on a tiny board and dump result to stdout
+runnnsymmetriestest : Run neural net on a hardcoded rectangle board and dump symmetries result
+runownershiptests : Run neural net search on some hardcoded positions and print avg ownership
+
+runoutputtests : Run a bunch of things and dump details to stdout
+runsearchtests : Run a bunch of things using a neural net and dump details to stdout
+runsearchtestsv3 : Run a bunch more things using a neural net and dump details to stdout
+runsearchtestsv8 : Run a bunch more things using a neural net and dump details to stdout
+runselfplayinittests : Run some tests involving selfplay training init using a neural net and dump details to stdout
+runsekitrainwritetests : Run some tests involving seki train output
+
+---Dev/experimental subcommands-------------
+demoplay
+lzcost
+matchauto
+sandbox
+>>>>>>> 737ddac56671eb166accaff5392c02ba12f82fe7
 )%%" << endl;
 }
 
@@ -77,12 +121,13 @@ int main(int argc, const char* argv[]) {
 
 
 string Version::getKataGoVersion() {
-  return string("1.6.2pre1+kt1.5.1");
+  return string("1.7.0+kt1.6.0");
 }
 
 string Version::getKataGoVersionForHelp() {
-  return string("KataGo v1.6.2 pre-release 1 (Minified version for KaTrain v1.5.1)");
+  return string("KataGo 1.7.0 (Minified version for KaTrain v1.6.0)");
 }
+
 
 
 string Version::getKataGoVersionFullInfo() {
@@ -92,6 +137,11 @@ string Version::getKataGoVersionFullInfo() {
   out << "Compile Time: " << __DATE__ << " " << __TIME__ << endl;
 #if defined(USE_CUDA_BACKEND)
   out << "Using CUDA backend" << endl;
+#if defined(CUDA_TARGET_VERSION)
+#define STRINGIFY(x) #x
+#define STRINGIFY2(x) STRINGIFY(x)
+  out << "Compiled with CUDA version " << STRINGIFY2(CUDA_TARGET_VERSION) << endl;
+#endif
 #elif defined(USE_OPENCL_BACKEND)
   out << "Using OpenCL backend" << endl;
 #elif defined(USE_EIGEN_BACKEND)
@@ -105,6 +155,9 @@ string Version::getKataGoVersionFullInfo() {
 #endif
 #if defined(COMPILE_MAX_BOARD_LEN)
   out << "Compiled to allow boards of size up to " << COMPILE_MAX_BOARD_LEN << endl;
+#endif
+#if defined(BUILD_DISTRIBUTED)
+  out << "Compiled to support contributing to online distributed selfplay" << endl;
 #endif
 
   return out.str();
