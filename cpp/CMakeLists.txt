@@ -359,6 +359,7 @@ endif(ZLIB_FOUND)
 
 target_compile_definitions(katago PRIVATE NO_LIBZIP)
 
+set(Boost_USE_STATIC_LIBS ON)
 find_package(Boost COMPONENTS system filesystem REQUIRED)
 include_directories(${Boost_INCLUDE_DIRS})
 target_link_libraries(katago ${Boost_FILESYSTEM_LIBRARY} ${Boost_SYSTEM_LIBRARY})
