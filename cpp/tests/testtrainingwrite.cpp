@@ -363,7 +363,8 @@ void Tests::runMoreSelfplayTestsWithNN(const string& modelFile) {
     bool testPolicySurpriseWeight,
     bool testValueSurpriseWeight,
     bool testHint,
-    bool testResign
+    bool testResign,
+    bool testScaleDataWeight
   ) {
     nnEval->clearCache();
     nnEval->clearStats();
@@ -374,6 +375,10 @@ void Tests::runMoreSelfplayTestsWithNN(const string& modelFile) {
     if(testLead) {
       params.chosenMoveTemperature = 1.0;
       params.chosenMoveTemperatureEarly = 1.0;
+    }
+    if(testHint) {
+      //Triggers an old buggy codepath that has since been fixed, but left here as part of test
+      params.rootPolicyTemperature = 1.000000000001;
     }
 
     MatchPairer::BotSpec botSpec;
@@ -420,7 +425,7 @@ void Tests::runMoreSelfplayTestsWithNN(const string& modelFile) {
     PlaySettings playSettings;
     playSettings.initGamesWithPolicy = true;
     playSettings.policyInitAreaProp = 0.04;
-    playSettings.sidePositionProb = 0.0;
+    playSettings.sidePositionProb = testScaleDataWeight ? 0.2 : 0.0;
     playSettings.cheapSearchProb = 0.5;
     playSettings.cheapSearchVisits = testResign ? 5 : 50;
     playSettings.cheapSearchTargetWeight = 0.456f;
@@ -438,6 +443,9 @@ void Tests::runMoreSelfplayTestsWithNN(const string& modelFile) {
       playSettings.allowResignation = true;
       playSettings.resignThreshold = -0.9;
       playSettings.resignConsecTurns = 3;
+    }
+    if(testScaleDataWeight) {
+      playSettings.scaleDataWeight = 4.0;
     }
 
     playSettings.forSelfPlay = !testResign;
@@ -491,23 +499,22 @@ void Tests::runMoreSelfplayTestsWithNN(const string& modelFile) {
       WriteSgf::writeSgf(cout,"Black","White",gameData->endHist,gameData,false,true);
       cout << endl;
     }
-    
+
     delete gameData;
     delete bot;
     cout << endl;
   };
 
-
-  run("testasym!",Rules::getTrompTaylorish(),true,false,false,false,false,false);
-  run("test lead!",Rules::getTrompTaylorish(),false,true,false,false,false,false);
+  run("testasym!",Rules::getTrompTaylorish(),true,false,false,false,false,false,false);
+  run("test lead!",Rules::getTrompTaylorish(),false,true,false,false,false,false,false);
   Rules r = Rules::getTrompTaylorish();
   r.hasButton = true;
-  run("test lead int button!",r,false,true,false,false,false,false);
-  run("test surprise!",Rules::getTrompTaylorish(),false,false,true,false,false,false);
-  run("test value surprise!",Rules::getTrompTaylorish(),false,false,false,true,false,false);
-  run("test hint!",Rules::getTrompTaylorish(),false,false,false,false,true,false);
-  run("test resign!",Rules::getTrompTaylorish(),false,false,false,false,false,true);
-
+  run("test lead int button!",r,false,true,false,false,false,false,false);
+  run("test surprise!",Rules::getTrompTaylorish(),false,false,true,false,false,false,false);
+  run("test value surprise!",Rules::getTrompTaylorish(),false,false,false,true,false,false,false);
+  run("test hint!",Rules::getTrompTaylorish(),false,false,false,false,true,false,false);
+  run("test resign!",Rules::getTrompTaylorish(),false,false,false,false,false,true,false);
+  run("test scale data weight!",Rules::getTrompTaylorish(),false,false,false,false,false,false,true);
 
   //Test lead specifically on a final position
   auto testLeadOnBoard = [&](
@@ -534,6 +541,100 @@ void Tests::runMoreSelfplayTestsWithNN(const string& modelFile) {
     cout << "LEAD: " << lead << endl;
     delete bot;
   };
+
+  //MORE TESTING ----------------------------------------------------------------
+
+  auto runMore = [&](
+    const string& seedBase,
+    const Rules& rules,
+    bool testPolicySurpriseWeight,
+    bool testValueSurpriseWeight,
+    bool testScaleDataWeight,
+    bool testSgf
+  ) {
+    nnEval->clearCache();
+    nnEval->clearStats();
+
+    SearchParams params;
+    params.maxVisits = 100;
+    params.drawEquivalentWinsForWhite = 0.5;
+
+    MatchPairer::BotSpec botSpec;
+    botSpec.botIdx = 0;
+    botSpec.botName = string("test");
+    botSpec.nnEval = nnEval;
+    botSpec.baseParams = params;
+
+    Board initialBoard(11,11);
+    Player initialPla = P_BLACK;
+    int initialEncorePhase = 0;
+    BoardHistory initialHist(initialBoard,initialPla,rules,initialEncorePhase);
+
+    ExtraBlackAndKomi extraBlackAndKomi;
+    extraBlackAndKomi.extraBlack = 0;
+    extraBlackAndKomi.komiBase = rules.komi;
+    extraBlackAndKomi.komi = rules.komi;
+    extraBlackAndKomi.makeGameFair = false;
+    extraBlackAndKomi.makeGameFairForEmptyBoard = false;
+
+    bool doEndGameIfAllPassAlive = true;
+    bool clearBotAfterSearch = true;
+    int maxMovesPerGame = 20;
+    vector<std::atomic<bool>*> stopConditions;
+    PlaySettings playSettings;
+    playSettings.initGamesWithPolicy = true;
+    playSettings.policyInitAreaProp = 0;
+    playSettings.sidePositionProb = 0.2;
+    playSettings.cheapSearchProb = 0.5;
+    playSettings.cheapSearchVisits = 50;
+    playSettings.cheapSearchTargetWeight = 0.0;
+    playSettings.compensateKomiVisits = 10;
+    playSettings.minAsymmetricCompensateKomiProb = 0.5;
+    if(testPolicySurpriseWeight)
+      playSettings.policySurpriseDataWeight = 0.5;
+    if(testValueSurpriseWeight)
+      playSettings.valueSurpriseDataWeight = 0.1;
+    if(testScaleDataWeight)
+      playSettings.scaleDataWeight = 1.5;
+
+    playSettings.forSelfPlay = true;
+
+    string searchRandSeed = seedBase+"search";
+    Search* bot = new Search(botSpec.baseParams, botSpec.nnEval, searchRandSeed);
+
+    cout << "====================================================================================================" << endl;
+    cout << "====================================================================================================" << endl;
+    cout << "====================================================================================================" << endl;
+    cout << "seedBase: " << seedBase << endl;
+
+    bool logSearchInfo = false;
+    Rand rand(seedBase+"play");
+    OtherGameProperties otherGameProps;
+    FinishedGameData* gameData = Play::runGame(
+      initialBoard,initialPla,initialHist,extraBlackAndKomi,
+      botSpec,botSpec,
+      bot,bot,
+      doEndGameIfAllPassAlive, clearBotAfterSearch,
+      logger, logSearchInfo, false,
+      maxMovesPerGame, stopConditions,
+      playSettings, otherGameProps,
+      rand,
+      nullptr,
+      nullptr
+    );
+    gameData->printDebug(cout);
+    if(testSgf) {
+      WriteSgf::writeSgf(cout,"Black","White",gameData->endHist,gameData,false,false);
+      cout << endl;
+    }
+    delete gameData;
+    delete bot;
+    cout << endl;
+  };
+
+  runMore("test policy surprise and scale together!",Rules::getTrompTaylorish(),true,false,true,false);
+  runMore("test value surprise and scale together!",Rules::getTrompTaylorish(),false,true,true,false);
+  runMore("test all three together!",Rules::getTrompTaylorish(),true,true,true,true);
 
   Rules rules = Rules::getTrompTaylorish();
   {
@@ -869,8 +970,8 @@ void Tests::runSekiTrainWriteTests(const string& modelFile) {
     extraBlackAndKomi.extraBlack = 0;
     extraBlackAndKomi.komiBase = rules.komi;
     extraBlackAndKomi.komi = rules.komi;
-    int turnNumber = sgf->moves.size();
-    sgf->setupBoardAndHistAssumeLegal(rules,initialBoard,initialPla,initialHist,turnNumber);
+    int turnIdx = sgf->moves.size();
+    sgf->setupBoardAndHistAssumeLegal(rules,initialBoard,initialPla,initialHist,turnIdx);
 
     bool doEndGameIfAllPassAlive = true;
     bool clearBotAfterSearch = true;

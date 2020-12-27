@@ -27,6 +27,15 @@ namespace Client {
     int64_t bytes;
     std::string sha256;
     bool isRandom;
+
+    void failIfSha256Mismatch(const std::string& modelPath) const;
+  };
+
+  struct DownloadState {
+    std::condition_variable downloadingInProgressVar;
+    bool downloadingInProgress;
+    DownloadState();
+    ~DownloadState();
   };
 
   struct Task {
@@ -46,7 +55,17 @@ namespace Client {
 
   class Connection {
   public:
-    Connection(const std::string& serverUrl, const std::string& username, const std::string& password, const std::string& caCertsFile, Logger* logger);
+    Connection(
+      const std::string& serverUrl,
+      const std::string& username,
+      const std::string& password,
+      const std::string& caCertsFile,
+      const std::string& proxyHost,
+      int proxyPort,
+      const std::string& modelDownloadMirrorBaseUrl,
+      bool mirrorUseProxy,
+      Logger* logger
+    );
     ~Connection();
 
     Connection(const Connection&) = delete;
@@ -61,6 +80,7 @@ namespace Client {
       Task& task,
       const std::string& baseDir,
       bool retryOnFailure,
+      bool allowSelfplayTask,
       bool allowRatingTask,
       int taskRepFactor,
       std::atomic<bool>& shouldStop
@@ -75,6 +95,11 @@ namespace Client {
     bool downloadModelIfNotPresent(
       const Client::ModelInfo& modelInfo, const std::string& modelDir,
       std::atomic<bool>& shouldStop
+    );
+
+    //Query server for newest model and maybe download it, even if it is not being used by tasks yet.
+    bool maybeDownloadNewestModel(
+      const std::string& modelDir, std::atomic<bool>& shouldStop
     );
 
     //Returns true if data was uploaded or upload was not needed.
@@ -97,17 +122,40 @@ namespace Client {
     std::string getTmpModelPath(const Client::ModelInfo& modelInfo, const std::string& modelDir);
     bool retryLoop(const char* errorLabel, int maxTries, std::atomic<bool>& shouldStop, std::function<void(int&)> f);
 
-    httplib::Client* httpClient;
-    httplib::SSLClient* httpsClient;
+    std::unique_ptr<httplib::Client> httpClient;
+    std::unique_ptr<httplib::SSLClient> httpsClient;
     bool isSSL;
+
+    std::string serverUrl;
+    std::string username;
+    std::string password;
+
     std::string baseResourcePath;
     std::string caCertsFile;
+    std::string proxyHost;
+    int proxyPort;
+
+    std::string modelDownloadMirrorBaseUrl;
+    bool mirrorUseProxy;
+
+    //Fixed string different on every startup but shared across all requests for this run of the client
+    std::string clientInstanceId;
 
     Logger* logger;
     Rand rand;
 
+    std::mutex downloadStateMutex;
+    std::map<std::string,std::shared_ptr<DownloadState>> downloadStateByUrl;
+
     //TODO if httplib is thread-safe, then we can remove this
     std::mutex mutex;
+
+    void recreateClients();
+
+    bool actuallyDownloadModel(
+      const Client::ModelInfo& modelInfo, const std::string& modelDir,
+      std::atomic<bool>& shouldStop
+    );
   };
 
 }

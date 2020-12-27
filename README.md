@@ -22,6 +22,7 @@
 * [Compiling KataGo](#compiling-katago)
   * [Linux](#linux)
   * [Windows](#windows)
+* [Source Code Overview](#source-code-overview)
 * [Selfplay Training](#selfplay-training)
 * [Contributors](#contributors)
 * [License](#license)
@@ -37,7 +38,7 @@ Experimentally, KataGo did also try some limited ways of using external data at 
 KataGo's latest run used about 28 GPUs, rather than thousands (like AlphaZero and ELF), first reached superhuman levels on that hardware in perhaps just three to six days, and reached strength similar to ELF in about 14 days. With minor adjustments and some more GPUs, starting around 40 days it roughly began to match surpass Leela Zero in some tests with different configurations, time controls, and hardware. The run continued for a total of about five months of training time, reaching several hundred Elo stronger than Leela Zero and likely other open-source bots. The run has ended for now, but we hope to be able to continue it or begin another run in the future!
 
 Paper about the major new ideas and techniques used in KataGo: [Accelerating Self-Play Learning in Go (arXiv)](https://arxiv.org/abs/1902.10565).
-A few further improvements have been found and incorporated into the latest run that are not described in this paper - some post about this might happen eventually.
+A few major further improvements have been found since then, some of which were used for the latest run and some of which were added later. These and a few research notes can be found [here](docs/KataGoMethods.md).
 
 Many thanks to [Jane Street](https://www.janestreet.com/) for providing the computation power necessary to train KataGo, as well to run numerous many smaller testing runs and experiments. Blog posts about the initial release and some interesting subsequent experiments:
 * [Accelerating Self-Play Learning in Go](https://blog.janestreet.com/accelerating-self-play-learning-in-go/)
@@ -64,7 +65,7 @@ Here is a graph of the improvement so over the course of the 157 training days o
 <tr><td><sub>X axis is days of training, log scale. (note: hardware is not entirely consistent during this time but most of the time was 44 V100 GPUs). Y axis is relative Elo rating based on some 1200-visit test matches. The abrupt jumps at the ends of each run are due to learning rate drops at the ends of those runs. The instability just before the jump in the June 2020 run, visible particularly in the 40-block Elo, is due to the last 40 days of that run being used to play with experimental changes, not all of which were improvements. 117 days is the last "clean" point prior to these changes.</sub></tr></td>
 </table>
 
-The first 117 days of the run were clean and adhered to "semi-zero" standards. In particular, game-specific input features and auxiliary training targets were used, most of which are described in KataGo's [paper](https://arxiv.org/abs/1902.10565). However there was no use of outside data nor any special heuristics or expert logic encoded into the search for biasing or selecting moves, beyond some minor optimizations to end finished games a little faster. Only minimal adjustments were made to the ongoing training, via high-level hyperparameters (e.g. decaying the learning rate, the schedule for enlarging the neural net, etc). The last 40 days of the run then began to experiment with some limited ways of using external data to see the effects.
+The first 117 days of the run were clean and adhered to "semi-zero" standards. In particular, game-specific input features and auxiliary training targets were used, most of which are described in KataGo's [paper](https://arxiv.org/abs/1902.10565), and a few more [here](docs/KataGoMethods.md). However there was no use of outside data nor any special heuristics or expert logic encoded into the search for biasing or selecting moves, beyond some minor optimizations to end finished games a little faster. Only minimal adjustments were made to the ongoing training, via high-level hyperparameters (e.g. decaying the learning rate, the schedule for enlarging the neural net, etc). The last 40 days of the run then began to experiment with some limited ways of using external data to see the effects.
 
 The run used about 46 GPUs for most of its duration. Of these, 40 were for self-play data generation, and up to 4 for training the main neural nets for the run, and 2 for gating games. Only 28 GPUs were used to surpass last year's run in the first 14 days. For days 14 to 38 this was increased to 36 GPUs, then from day 38 onward increased again to the current 46 GPUs, which was the number used for the rest of the run. One extra 47th GPU was used sometimes during the experimental changes in the last 40 days. Additionally, at times up to 3 more GPUs were used for training some extra networks such as extended smaller networks for end-users with weaker hardware, but these played no role in the run proper.
 
@@ -137,7 +138,7 @@ And for comparison to the old 2019 June official run: (these Elos are directly m
 ### Comparisons to Other Bots
 As of June 2020, KataGo appears to be significantly stronger than several other major open-source bots in a variety of tests and conditions.
 
-For some tests versus Leela Zero and ELF, see https://github.com/lightvector/KataGo/issues/254, as well as #test-results in https://discord.gg/bqkZAz3 and various casual tests run by various users in https://lifein19x19.com/viewtopic.php?f=18&t=17195 and https://lifein19x19.com/viewtopic.php?f=18&t=17474 at various points in KataGo's progression. See also the [paper](https://arxiv.org/abs/1902.10565) for test results regarding KataGo's June 2019 run ("g104") against some opponents - but also note that KataGo's June 2019 run learned somewhere between 1.5x and 2x less efficiently than more recent and much better June 2020 run ("g170").
+For some tests versus Leela Zero and ELF, see https://github.com/lightvector/KataGo/issues/254, as well as #test-results in https://discord.gg/bqkZAz3 and various casual tests run by various users in https://lifein19x19.com/viewtopic.php?f=18&t=17195 and https://lifein19x19.com/viewtopic.php?f=18&t=17474 at various points in KataGo's progression. See also the [paper](https://arxiv.org/abs/1902.10565) for test results regarding KataGo's June 2019 run ("g104") against some opponents. As a result of some further improvements, the most notable of which are documented [here](docs/KataGoMethods.md) along with other research notes, KataGo's June 2019 run learned somewhere between 1.5x and 2x less efficiently than more recent and much better June 2020 run ("g170").
 
 Based on some of these tests, although most of these used all different parameters and match conditions and hardware, **if one were to try to put Leela Zero on the same Elo scale as in the above tables, one could maybe guess LZ272 to be very roughly somewhere between 1250 and 1450 Elo**. But note also that the above Elos, due to being computed primarily by match games with earlier networks in the same run (although selected with high variety to avoid "rock-paper-scissors" issues) are likely to *not* be fully linear/transitive to other bots. Or even to other KataGo networks, particularly for larger differences. For example, it would not be surprising if one were to take two networks that were a large 400 Elo apart, and discover that in a direct test that the stronger one did not win quite precisely win 10 games per 1 lost game as the Elo model would predict, although one might expect still something close.
 
@@ -239,7 +240,7 @@ Run a JSON-based [analysis engine](docs/Analysis_Engine.md) that can do efficien
 Run a high-performance match engine that will play a pool of bots against each other sharing the same GPU batches and CPUs with each other:
 
    * `./katago match -config <MATCH_CONFIG>.cfg -log-file match.log -sgf-output-dir <DIR TO WRITE THE SGFS>`
-   
+
 Force OpenCL tuner to re-tune:
 
    * `./katago tuner -config <GTP_CONFIG>.cfg`
@@ -280,9 +281,15 @@ then you are using the Mesa drivers. You will need to change your drivers, see f
    * KataGo probably does not have access permissions to write files in the directory where you placed it.
    * On Windows for example, the `Program Files` directory and its subdirectories are often restricted to only allow writes with admin-level permissions. Try placing KataGo somewhere else.
 
+* **I'm new to the command line and still having trouble knowing what to tell Lizzie/q5go/Sabaki/whatever to make it run KataGo**.
+   * Again, make sure you have your directory paths right.
+   * A common issue: AVOID having any spaces in any file or directory names anywhere, since depending on the GUI, this may require you to have to quote or character-escape the paths or arguments in various ways.
+   * If you don't understand command line arguments and flags, relative vs absolute file paths, etc, search online. Try pages like https://superuser.com/questions/1270591/how-to-use-relative-paths-on-windows-cmd or https://www.bleepingcomputer.com/tutorials/understanding-command-line-arguments-and-how-to-use-them/ or other pages you find, or get someone tech-savvy to help you in a chat or even in-person if you can.
+   * Consider using https://github.com/sanderland/katrain instead - this is an excellent GUI written by someone else for KataGo that usually automates all of the technical setup for you.
+
 * **I'm getting a different error or still want further help.**
    * Check out [the discord chat where Leela Zero, KataGo, and other bots hang out](https://discord.gg/bqkZAz3) and ask in the "#help" channel.
-   * If you think you've found a bug in KataGo itself, feel free also to [open an issue](https://github.com/lightvector/KataGo/issues).
+   * If you think you've found a bug in KataGo itself, feel free also to [open an issue](https://github.com/lightvector/KataGo/issues). Please provide as much detail as possible about the exact commands you ran, the full error message and output (if you're in a GUI, please make sure to check that GUI's raw GTP console or log), the things you've tried, your config file and network, your GPU and operating system, etc.
 
 #### Other Questions
 * **How do I make KataGo use Japanese rules or other rules?**
@@ -323,7 +330,7 @@ KataGo is written in C++. It should compile on Linux or OSX via g++ that support
       * CMake with a minimum version of 3.10.2 - for example `sudo apt install cmake` on Debian, or download from https://cmake.org/download/ if that doesn't give you a recent-enough version.
       * Some version of g++ that supports at least C++14.
       * If using the OpenCL backend, a modern GPU that supports OpenCL 1.2 or greater, or else something like [this](https://software.intel.com/en-us/opencl-sdk) for CPU. But if using CPU, Eigen should be better.
-      * If using the CUDA backend, CUDA 10.2 and CUDNN 7.6.5 (https://developer.nvidia.com/cuda-toolkit) (https://developer.nvidia.com/cudnn) and a GPU capable of supporting them. I'm unsure how version compatibility works with CUDA, there's a good chance that later versions than these work just as well, but they have not been tested.
+      * If using the CUDA backend, CUDA 10.2 with CUDNN 7.6.5, or CUDA 11.1 with CUDNN 8.0.4 (https://developer.nvidia.com/cuda-toolkit) (https://developer.nvidia.com/cudnn) and a GPU capable of supporting them. I'm unsure how version compatibility works with CUDA, there's a good chance that later versions than these work just as well, but they have not been tested.
       * If using the Eigen backend, Eigen3. With Debian packages, (i.e. apt or apt-get), this should be `libeigen3-dev`.
       * zlib, libzip. With Debian packages (i.e. apt or apt-get), these should be `zlib1g-dev`, `libzip-dev`.
       * If you want to do self-play training and research, probably Google perftools `libgoogle-perftools-dev` for TCMalloc or some other better malloc implementation. For unknown reasons, the allocation pattern in self-play with large numbers of threads and parallel games causes a lot of memory fragmentation under glibc malloc that will eventually run your machine out of memory, but better mallocs handle it fine.
@@ -346,7 +353,7 @@ KataGo is written in C++. It should compile on Linux or OSX via g++ that support
       * CMake with a minimum version of 3.10.2, GUI version strongly recommended (https://cmake.org/download/)
       * Microsoft Visual Studio for C++. Version 15 (2017) has been tested and should work, other versions might work as well.
       * If using the OpenCL backend, a modern GPU that supports OpenCL 1.2 or greater, or else something like [this](https://software.intel.com/en-us/opencl-sdk) for CPU. But if using CPU, Eigen should be better.
-      * If using the CUDA backend, CUDA 10.2 and CUDNN 7.6.5 (https://developer.nvidia.com/cuda-toolkit) (https://developer.nvidia.com/cudnn) and a GPU capable of supporting them. I'm unsure how version compatibility works with CUDA, there's a good chance that later versions than these work just as well, but they have not been tested.
+      * If using the CUDA backend, CUDA 10.2 with CUDNN 7.6.5, or CUDA 11.1 with CUDNN 8.0.4 (https://developer.nvidia.com/cuda-toolkit) (https://developer.nvidia.com/cudnn) and a GPU capable of supporting them. I'm unsure how version compatibility works with CUDA, there's a good chance that later versions than these work just as well, but they have not been tested.
       * If using the Eigen backend, Eigen3, version 3.3.x. (http://eigen.tuxfamily.org/index.php?title=Main_Page#Download).
       * zlib. The following package might work, https://www.nuget.org/packages/zlib-vc140-static-64/, or alternatively you can build it yourself via something like: https://github.com/kiyolee/zlib-win-build
       * libzip (optional, needed only for self-play training) - for example https://github.com/kiyolee/libzip-win-build
@@ -370,6 +377,9 @@ KataGo is written in C++. It should compile on Linux or OSX via g++ that support
    * Pre-trained neural nets are available on the [releases page](https://github.com/lightvector/KataGo/releases) or more from [here](https://d3dndmfyhecmj0.cloudfront.net/g170/index.html).
    * You will probably want to edit `configs/gtp_example.cfg` (see "Tuning for Performance" above).
    * If using OpenCL, you will want to verify that KataGo is picking up the correct device (e.g. some systems may have both an Intel CPU OpenCL and GPU OpenCL, if KataGo appears to pick the wrong one, you can correct this by specifying `openclGpuToUse` in `configs/gtp_example.cfg`).
+
+## Source Code Overview:
+See the [cpp readme](cpp/README.md) or the [python readme](python/README.md) for some high-level overviews of the source code in this repo, if you want to get a sense of what is where and how it fits together.
 
 ## Selfplay Training:
 If you'd also like to run the full self-play loop and train your own neural nets using the code here, see [Selfplay Training](SelfplayTraining.md).

@@ -7,6 +7,11 @@ include_directories(external)
 include_directories(external/tclap-1.2.2/include)
 include_directories(SYSTEM external/filesystem-1.3.6/include) #SYSTEM suppresses a few warnings
 
+if(${CMAKE_VERSION} VERSION_GREATER_EQUAL "3.18.0")
+  # Suppress a warning message for setting cuda flags that still works fine for now
+  cmake_policy(SET CMP0104 OLD)
+endif()
+
 #--------------------------- PLATFORM SPECIFIC -------------------------------------------------------------------------
 
 if(APPLE)
@@ -173,7 +178,7 @@ endif()
 #--------------------------- TCMALLOC ----------------------------------------------------------------------------------
 
 if(USE_TCMALLOC)
-  message("-DUSE_TCMALLOC=1 is set, using tcmalloc as the allocator")
+  message(STATUS "-DUSE_TCMALLOC=1 is set, using tcmalloc as the allocator")
   find_library(TCMALLOC_LIB NAMES tcmalloc_minimal HINTS /usr)
   if(NOT TCMALLOC_LIB)
     message(FATAL_ERROR "Could not find tcmalloc")
@@ -185,16 +190,26 @@ endif()
 
 #--------------------------- GIT ---------------------------------------------------------------------------------------
 
-if(NO_GIT_REVISION)
+if(NO_GIT_REVISION AND (NOT BUILD_DISTRIBUTED))
   message(STATUS "-DNO_GIT_REVISION=1 is set, avoiding including the Git revision in compiled executable")
   unset(GIT_HEADER_FILE_ALWAYS_UPDATED)
 else()
-  message(STATUS "Including Git revision in the compiled executable, specify -DNO_GIT_REVISION=1 to disable")
+  if(NO_GIT_REVISION AND BUILD_DISTRIBUTED)
+    message(STATUS "${ColorRed}NO_GIT_REVISION is set, but but BUILD_DISTRIBUTED is also set and distributed requires git revision, so ignoring NO_GIT_REVISION.${ColorReset}")
+  elseif(BUILD_DISTRIBUTED)
+    message(STATUS "Including Git revision in the compiled executable")
+  else()
+    message(STATUS "Including Git revision in the compiled executable, specify -DNO_GIT_REVISION=1 to disable")
+  endif()
   find_package(Git)
   if(NOT GIT_FOUND)
     set(GIT_EXECUTABLE ${GIT_EXECUTABLE} CACHE FILEPATH "Path to git executable")
     mark_as_advanced(CLEAR GIT_EXECUTABLE)
-    message(SEND_ERROR "${ColorBoldRed}Git executable was not found. Either specify GIT_EXECUTABLE as the path to the git executable, or use NO_GIT_REVISION to disable.${ColorReset}")
+    if(BUILD_DISTRIBUTED)
+      message(SEND_ERROR "${ColorBoldRed}Git executable was not found. Either specify GIT_EXECUTABLE as the path to the git executable.${ColorReset}")
+    else()
+      message(SEND_ERROR "${ColorBoldRed}Git executable was not found. Either specify GIT_EXECUTABLE as the path to the git executable, or use NO_GIT_REVISION to disable.${ColorReset}")
+    endif()
   endif()
   set(GIT_HEADER_FILE_TEMPLATE_BARE program/gitinfotemplate.h)
   set(GIT_HEADER_FILE_ALWAYS_UPDATED_BARE program/gitinfoupdated.h)
@@ -254,6 +269,7 @@ add_executable(katago
   search/searchresults.cpp
   search/asyncbot.cpp
   search/distributiontable.cpp
+  search/subtreevaluebiastable.cpp
   search/analysisdata.cpp
   program/gtpconfig.cpp
   program/setup.cpp
@@ -274,6 +290,8 @@ add_executable(katago
   tests/testtime.cpp
   tests/testtrainingwrite.cpp
   tests/testnn.cpp
+  tests/tinymodel.cpp
+  tests/tinymodeldata.cpp
   distributed/client.cpp
   command/commandline.cpp
   command/analysis.cpp
@@ -286,7 +304,7 @@ if(USE_BACKEND STREQUAL "CUDA")
   find_package(CUDA REQUIRED)
   find_path(CUDNN_INCLUDE_DIR cudnn.h HINTS ${CUDNN_ROOT_DIR} ${CUDA_TOOLKIT_ROOT_DIR} PATH_SUFFIXES cuda/include include)
   if((NOT CUDNN_INCLUDE_DIR))
-    message(ERROR "${ColorBoldRed} cudnn.h was NOT found, specify CUDNN_INCLUDE_DIR to indicate where it is. ${ColorReset}")
+    message(FATAL_ERROR "${ColorBoldRed} cudnn.h was NOT found, specify CUDNN_INCLUDE_DIR to indicate where it is. ${ColorReset}")
   endif()
   find_library(CUDNN_LIBRARY libcudnn.so PATHS /usr/local/cuda/lib64 /opt/cuda/lib64)
   include_directories(SYSTEM ${CUDA_INCLUDE_DIRS} ${CUDNN_INCLUDE_DIR}) #SYSTEM is for suppressing some compiler warnings in thrust libraries
@@ -302,7 +320,7 @@ elseif(USE_BACKEND STREQUAL "EIGEN")
   if(NOT MSVC)
     find_package(Eigen3 REQUIRED)
     include_directories(SYSTEM ${EIGEN3_INCLUDE_DIRS})
-    message("Found Eigen3 at ${EIGEN3_INCLUDE_DIRS}")
+    message(STATUS "Found Eigen3 at ${EIGEN3_INCLUDE_DIRS}")
   else()
     if(EIGEN3_INCLUDE_DIRS)
       message(STATUS "EIGEN3_INCLUDE_DIRS is set to ${EIGEN3_INCLUDE_DIRS}, assuming that Eigen3 header files are here.")
@@ -314,7 +332,7 @@ elseif(USE_BACKEND STREQUAL "EIGEN")
         message(FATAL_ERROR "*** KataGo: Eigen3 was not found. If you've downloaded Eigen3, you can IGNORE the whole above error from CMake and just set 'EIGEN3_INCLUDE_DIRS' to the root eigen3-3.*.* directory after unzipping it. Among other things it should contain 'Eigen' and 'unsupported' subdirs, which is all KataGo needs. Otherwise, you will need to 'build' Eigen3 even though it is header-only and install it via MSVC in order for cmake to find it via FindEigen3.cmake.")
       else()
         include_directories(SYSTEM ${EIGEN3_INCLUDE_DIRS})
-        message("Found Eigen3 at ${EIGEN3_INCLUDE_DIRS}")
+        message(STATUS "Found Eigen3 at ${EIGEN3_INCLUDE_DIRS}")
       endif()
     endif()
   endif()
@@ -324,7 +342,7 @@ if(USE_BIGGER_BOARDS_EXPENSIVE)
   target_compile_definitions(katago PRIVATE COMPILE_MAX_BOARD_LEN=29)
 endif()
 
-if(NO_GIT_REVISION)
+if(NO_GIT_REVISION AND (NOT BUILD_DISTRIBUTED))
   target_compile_definitions(katago PRIVATE NO_GIT_REVISION)
 endif()
 
@@ -370,7 +388,7 @@ if(MSVC)
 endif()
 
 if(CMAKE_COMPILER_IS_GNUCC)
-  if(NOT (${CMAKE_SYSTEM_PROCESSOR} MATCHES "arm"))
+  if(NOT (${CMAKE_SYSTEM_PROCESSOR} MATCHES "(arm|aarch32|aarch64)"))
     set(CMAKE_CXX_FLAGS  "${CMAKE_CXX_FLAGS} -mfpmath=sse -ffunction-sections  -fdata-sections -flto -Os")
     set(CMAKE_EXE_LINKER_FLAGS  "${CMAKE_EXE_LINKER_FLAGS} -Wl,--gc-sections -flto")
   endif()

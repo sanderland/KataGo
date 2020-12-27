@@ -451,6 +451,8 @@ void NNEvaluator::serve(
         resultBuf->result->whiteScoreMeanSq = (float)whiteScoreMeanSq;
         resultBuf->result->whiteLead = (float)whiteScoreMean;
         resultBuf->result->varTimeLeft = (float)varTimeLeft;
+        resultBuf->result->shorttermWinlossError = 0.0f;
+        resultBuf->result->shorttermScoreError = 0.0f;
         resultBuf->hasResult = true;
         resultBuf->clientWaitingForResult.notify_all();
         resultLock.unlock();
@@ -663,6 +665,8 @@ void NNEvaluator::evaluate(
     buf.result->whiteScoreMeanSq = resultWithoutOwnerMap->whiteScoreMeanSq;
     buf.result->whiteLead = resultWithoutOwnerMap->whiteLead;
     buf.result->varTimeLeft = resultWithoutOwnerMap->varTimeLeft;
+    buf.result->shorttermWinlossError = resultWithoutOwnerMap->shorttermWinlossError;
+    buf.result->shorttermScoreError = resultWithoutOwnerMap->shorttermScoreError;
     std::copy(resultWithoutOwnerMap->policyProbs, resultWithoutOwnerMap->policyProbs + NNPos::MAX_NN_POLICY_SIZE, buf.result->policyProbs);
     buf.result->nnXLen = resultWithoutOwnerMap->nnXLen;
     buf.result->nnYLen = resultWithoutOwnerMap->nnYLen;
@@ -746,7 +750,7 @@ void NNEvaluator::evaluate(
 
     //Fix up the value as well. Note that the neural net gives us back the value from the perspective
     //of the player so we need to negate that to make it the white value.
-    static_assert(NNModelVersion::latestModelVersionImplemented == 8, "");
+    static_assert(NNModelVersion::latestModelVersionImplemented == 10, "");
     if(modelVersion == 3) {
       const double twoOverPi = 0.63661977236758134308;
 
@@ -786,6 +790,8 @@ void NNEvaluator::evaluate(
         buf.result->whiteScoreMeanSq = buf.result->whiteScoreMean * buf.result->whiteScoreMean;
         buf.result->whiteLead = buf.result->whiteScoreMean;
         buf.result->varTimeLeft = -1;
+        buf.result->shorttermWinlossError = -1;
+        buf.result->shorttermScoreError = -1;
       }
       else {
         buf.result->whiteWinProb = (float)lossProb;
@@ -795,10 +801,12 @@ void NNEvaluator::evaluate(
         buf.result->whiteScoreMeanSq = buf.result->whiteScoreMean * buf.result->whiteScoreMean;
         buf.result->whiteLead = buf.result->whiteScoreMean;
         buf.result->varTimeLeft = -1;
+        buf.result->shorttermWinlossError = -1;
+        buf.result->shorttermScoreError = -1;
       }
 
     }
-    else if(modelVersion == 4 || modelVersion == 5 || modelVersion == 6 || modelVersion == 7 || modelVersion == 8) {
+    else if(modelVersion >= 4 && modelVersion <= 10) {
       double winProb;
       double lossProb;
       double noResultProb;
@@ -806,6 +814,8 @@ void NNEvaluator::evaluate(
       double scoreMeanSq;
       double lead;
       double varTimeLeft;
+      double shorttermWinlossError;
+      double shorttermScoreError;
       {
         double winLogits = buf.result->whiteWinProb;
         double lossLogits = buf.result->whiteLossProb;
@@ -814,6 +824,8 @@ void NNEvaluator::evaluate(
         double scoreStdevPreSoftplus = buf.result->whiteScoreMeanSq;
         double leadPreScaled = buf.result->whiteLead;
         double varTimeLeftPreSoftplus = buf.result->varTimeLeft;
+        double shorttermWinlossErrorPreSoftplus = buf.result->shorttermWinlossError;
+        double shorttermScoreErrorPreSoftplus = buf.result->shorttermScoreError;
 
         if(history.rules.koRule != Rules::KO_SIMPLE && history.rules.scoringRule != Rules::SCORING_TERRITORY)
           noResultLogits -= 100000.0;
@@ -836,7 +848,7 @@ void NNEvaluator::evaluate(
         double scoreStdev = softPlus(scoreStdevPreSoftplus) * 20.0;
         scoreMeanSq = scoreMean * scoreMean + scoreStdev * scoreStdev;
         lead = leadPreScaled * 20.0;
-        varTimeLeft = softPlus(varTimeLeftPreSoftplus) * 150.0;
+        varTimeLeft = softPlus(varTimeLeftPreSoftplus) * 40.0;
 
         //scoreMean and scoreMeanSq are still conditional on having a result, we need to make them unconditional now
         //noResult counts as 0 score for scorevalue purposes.
@@ -844,11 +856,30 @@ void NNEvaluator::evaluate(
         scoreMeanSq = scoreMeanSq * (1.0-noResultProb);
         lead = lead * (1.0-noResultProb);
 
-        if(!isfinite(probSum) || !isfinite(scoreMean) || !isfinite(scoreMeanSq) || !isfinite(lead) || !isfinite(varTimeLeft)) {
+        if(modelVersion >= 10) {
+          shorttermWinlossError = sqrt(softPlus(shorttermWinlossErrorPreSoftplus) * 0.25);
+          shorttermScoreError = sqrt(softPlus(shorttermScoreErrorPreSoftplus) * 30.0);
+        }
+        else {
+          shorttermWinlossError = softPlus(shorttermWinlossErrorPreSoftplus);
+          shorttermScoreError = softPlus(shorttermScoreErrorPreSoftplus) * 10.0;
+        }
+
+        if(
+          !isfinite(probSum) ||
+          !isfinite(scoreMean) ||
+          !isfinite(scoreMeanSq) ||
+          !isfinite(lead) ||
+          !isfinite(varTimeLeft) ||
+          !isfinite(shorttermWinlossError) ||
+          !isfinite(shorttermScoreError)
+        ) {
           cout << "Got nonfinite for nneval value" << endl;
           cout << winLogits << " " << lossLogits << " " << noResultLogits
                << " " << scoreMean << " " << scoreMeanSq
-               << " " << lead << " " << varTimeLeft << endl;
+               << " " << lead << " " << varTimeLeft
+               << " " << shorttermWinlossError << " " << shorttermScoreError
+               << endl;
           throw StringError("Got nonfinite for nneval value");
         }
       }
@@ -870,10 +901,16 @@ void NNEvaluator::evaluate(
         buf.result->whiteLead = -(float)lead;
       }
 
-      if(modelVersion >= 8)
+      if(modelVersion >= 9) {
         buf.result->varTimeLeft = (float)varTimeLeft;
-      else
+        buf.result->shorttermWinlossError = (float)shorttermWinlossError;
+        buf.result->shorttermScoreError = (float)shorttermScoreError;
+      }
+      else {
         buf.result->varTimeLeft = -1;
+        buf.result->shorttermWinlossError = -1;
+        buf.result->shorttermScoreError = -1;
+      }
     }
     else {
       throw StringError("NNEval value postprocessing not implemented for model version");
@@ -882,7 +919,7 @@ void NNEvaluator::evaluate(
 
   //Postprocess ownermap
   if(buf.result->whiteOwnerMap != NULL) {
-    if(modelVersion == 3 || modelVersion == 4 || modelVersion == 5 || modelVersion == 6 || modelVersion == 7 || modelVersion == 8) {
+    if(modelVersion >= 3 && modelVersion <= 10) {
       for(int pos = 0; pos<nnXLen*nnYLen; pos++) {
         int y = pos / nnXLen;
         int x = pos % nnXLen;

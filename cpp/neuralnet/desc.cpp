@@ -568,104 +568,107 @@ TrunkDesc::TrunkDesc(istream& in, int vrsn, bool binaryFloats) {
     if(in.fail())
       throw StringError(name + ": failed to parse block kind");
     if(kind == "ordinary_block") {
-      ResidualBlockDesc* desc = new ResidualBlockDesc(in,binaryFloats);
+      unique_ptr_void descPtr = make_unique_void(new ResidualBlockDesc(in,binaryFloats));
+      ResidualBlockDesc& desc = *((ResidualBlockDesc*)descPtr.get());
 
-      if(desc->preBN.numChannels != trunkNumChannels)
+      if(desc.preBN.numChannels != trunkNumChannels)
         throw StringError(
           name + Global::strprintf(
                    ": %s preBN.numChannels (%d) != trunkNumChannels (%d)",
-                   desc->name.c_str(),
-                   desc->preBN.numChannels,
+                   desc.name.c_str(),
+                   desc.preBN.numChannels,
                    trunkNumChannels));
-      if(desc->regularConv.outChannels != midNumChannels)
+      if(desc.regularConv.outChannels != midNumChannels)
         throw StringError(
           name + Global::strprintf(
                    ": %s regularConv.outChannels (%d) != regularNumChannels+dilatedNumChannels (%d)",
-                   desc->name.c_str(),
-                   desc->regularConv.outChannels,
+                   desc.name.c_str(),
+                   desc.regularConv.outChannels,
                    regularNumChannels + dilatedNumChannels));
-      if(desc->regularConv.outChannels != midNumChannels)
+      if(desc.regularConv.outChannels != midNumChannels)
         throw StringError(
           name + Global::strprintf(
                    ": %s regularConv.outChannels (%d) != midNumChannels (%d)",
-                   desc->name.c_str(),
-                   desc->regularConv.outChannels,
+                   desc.name.c_str(),
+                   desc.regularConv.outChannels,
                    midNumChannels));
-      if(desc->finalConv.outChannels != trunkNumChannels)
+      if(desc.finalConv.outChannels != trunkNumChannels)
         throw StringError(
           name + Global::strprintf(
                    ": %s finalConv.outChannels (%d) != trunkNumChannels (%d)",
-                   desc->name.c_str(),
-                   desc->finalConv.outChannels,
+                   desc.name.c_str(),
+                   desc.finalConv.outChannels,
                    trunkNumChannels));
 
-      blocks.push_back(make_pair(ORDINARY_BLOCK_KIND, (void*)desc));
+      blocks.push_back(make_pair(ORDINARY_BLOCK_KIND, std::move(descPtr)));
     } else if(kind == "dilated_block") {
-      DilatedResidualBlockDesc* desc = new DilatedResidualBlockDesc(in,binaryFloats);
+      unique_ptr_void descPtr = make_unique_void(new DilatedResidualBlockDesc(in,binaryFloats));
+      DilatedResidualBlockDesc& desc = *((DilatedResidualBlockDesc*)descPtr.get());
 
-      if(desc->preBN.numChannels != trunkNumChannels)
+      if(desc.preBN.numChannels != trunkNumChannels)
         throw StringError(
           name + Global::strprintf(
                    ": %s preBN.numChannels (%d) != trunkNumChannels (%d)",
-                   desc->name.c_str(),
-                   desc->preBN.numChannels,
+                   desc.name.c_str(),
+                   desc.preBN.numChannels,
                    trunkNumChannels));
-      if(desc->regularConv.outChannels != regularNumChannels)
+      if(desc.regularConv.outChannels != regularNumChannels)
         throw StringError(
           name + Global::strprintf(
                    ": %s regularConv.outChannels (%d) != trunkNumChannels (%d)",
-                   desc->name.c_str(),
-                   desc->regularConv.outChannels,
+                   desc.name.c_str(),
+                   desc.regularConv.outChannels,
                    regularNumChannels));
-      if(desc->dilatedConv.outChannels != dilatedNumChannels)
+      if(desc.dilatedConv.outChannels != dilatedNumChannels)
         throw StringError(
           name + Global::strprintf(
                    ": %s dilatedConv.outChannels (%d) != trunkNumChannels (%d)",
-                   desc->name.c_str(),
-                   desc->dilatedConv.outChannels,
+                   desc.name.c_str(),
+                   desc.dilatedConv.outChannels,
                    dilatedNumChannels));
-      if(desc->finalConv.outChannels != trunkNumChannels)
+      if(desc.finalConv.outChannels != trunkNumChannels)
         throw StringError(
           name + Global::strprintf(
                    ": %s finalConv.outChannels (%d) != trunkNumChannels (%d)",
-                   desc->name.c_str(),
-                   desc->finalConv.outChannels,
+                   desc.name.c_str(),
+                   desc.finalConv.outChannels,
                    trunkNumChannels));
 
-      blocks.push_back(make_pair(DILATED_BLOCK_KIND, (void*)desc));
+      blocks.push_back(make_pair(DILATED_BLOCK_KIND, std::move(descPtr)));
     } else if(kind == "gpool_block") {
-      GlobalPoolingResidualBlockDesc* desc = new GlobalPoolingResidualBlockDesc(in, version, binaryFloats);
+      unique_ptr_void descPtr = make_unique_void(new GlobalPoolingResidualBlockDesc(in, version, binaryFloats));
+      GlobalPoolingResidualBlockDesc& desc = *((GlobalPoolingResidualBlockDesc*)descPtr.get());
 
-      if(desc->preBN.numChannels != trunkNumChannels)
+      if(desc.preBN.numChannels != trunkNumChannels)
         throw StringError(
           name + Global::strprintf(
                    ": %s preBN.numChannels (%d) != trunkNumChannels (%d)",
-                   desc->name.c_str(),
-                   desc->preBN.numChannels,
+                   desc.name.c_str(),
+                   desc.preBN.numChannels,
                    trunkNumChannels));
-      if(desc->regularConv.outChannels != regularNumChannels)
+      if(desc.regularConv.outChannels != regularNumChannels)
         throw StringError(
           name + Global::strprintf(
                    ": %s regularConv.outChannels (%d) != trunkNumChannels (%d)",
-                   desc->name.c_str(),
-                   desc->regularConv.outChannels,
+                   desc.name.c_str(),
+                   desc.regularConv.outChannels,
                    regularNumChannels));
-      if(desc->gpoolConv.outChannels != gpoolNumChannels)
+      if(desc.gpoolConv.outChannels != gpoolNumChannels)
         throw StringError(
           name + Global::strprintf(
                    ": %s gpoolConv.outChannels (%d) != trunkNumChannels (%d)",
-                   desc->name.c_str(),
-                   desc->gpoolConv.outChannels,
+                   desc.name.c_str(),
+                   desc.gpoolConv.outChannels,
                    gpoolNumChannels));
-      if(desc->finalConv.outChannels != trunkNumChannels)
+      if(desc.finalConv.outChannels != trunkNumChannels)
         throw StringError(
           name + Global::strprintf(
                    ": %s finalConv.outChannels (%d) != trunkNumChannels (%d)",
-                   desc->name.c_str(),
-                   desc->finalConv.outChannels,
+                   desc.name.c_str(),
+                   desc.finalConv.outChannels,
                    trunkNumChannels));
 
-      blocks.push_back(make_pair(GLOBAL_POOLING_BLOCK_KIND, (void*)desc));
+      blocks.push_back(make_pair(GLOBAL_POOLING_BLOCK_KIND, std::move(descPtr)));
     } else
       throw StringError(name + ": found unknown block kind: " + kind);
 
@@ -686,38 +689,9 @@ TrunkDesc::TrunkDesc(istream& in, int vrsn, bool binaryFloats) {
 }
 
 TrunkDesc::~TrunkDesc() {
-  for(int i = 0; i < blocks.size(); i++) {
-    if(blocks[i].first == ORDINARY_BLOCK_KIND) {
-      ResidualBlockDesc* desc = (ResidualBlockDesc*)blocks[i].second;
-      delete desc;
-    }
-    else if(blocks[i].first == DILATED_BLOCK_KIND) {
-      DilatedResidualBlockDesc* desc = (DilatedResidualBlockDesc*)blocks[i].second;
-      delete desc;
-    }
-    else if(blocks[i].first == GLOBAL_POOLING_BLOCK_KIND) {
-      GlobalPoolingResidualBlockDesc* desc = (GlobalPoolingResidualBlockDesc*)blocks[i].second;
-      delete desc;
-    }
-  }
 }
 
 TrunkDesc::TrunkDesc(TrunkDesc&& other) {
-  for(int i = 0; i < blocks.size(); i++) {
-    if(blocks[i].first == ORDINARY_BLOCK_KIND) {
-      ResidualBlockDesc* desc = (ResidualBlockDesc*)blocks[i].second;
-      delete desc;
-    }
-    else if(blocks[i].first == DILATED_BLOCK_KIND) {
-      DilatedResidualBlockDesc* desc = (DilatedResidualBlockDesc*)blocks[i].second;
-      delete desc;
-    }
-    else if(blocks[i].first == GLOBAL_POOLING_BLOCK_KIND) {
-      GlobalPoolingResidualBlockDesc* desc = (GlobalPoolingResidualBlockDesc*)blocks[i].second;
-      delete desc;
-    }
-  }
-
   name = std::move(other.name);
   version = other.version;
   numBlocks = other.numBlocks;
@@ -754,13 +728,13 @@ void TrunkDesc::iterConvLayers(std::function<void(const ConvLayerDesc& desc)> f)
   f(initialConv);
   for(int i = 0; i < blocks.size(); i++) {
     if(blocks[i].first == ORDINARY_BLOCK_KIND) {
-      ResidualBlockDesc* desc = (ResidualBlockDesc*)blocks[i].second;
+      ResidualBlockDesc* desc = (ResidualBlockDesc*)blocks[i].second.get();
       desc->iterConvLayers(f);
     } else if(blocks[i].first == DILATED_BLOCK_KIND) {
-      DilatedResidualBlockDesc* desc = (DilatedResidualBlockDesc*)blocks[i].second;
+      DilatedResidualBlockDesc* desc = (DilatedResidualBlockDesc*)blocks[i].second.get();
       desc->iterConvLayers(f);
     } else if(blocks[i].first == GLOBAL_POOLING_BLOCK_KIND) {
-      GlobalPoolingResidualBlockDesc* desc = (GlobalPoolingResidualBlockDesc*)blocks[i].second;
+      GlobalPoolingResidualBlockDesc* desc = (GlobalPoolingResidualBlockDesc*)blocks[i].second.get();
       desc->iterConvLayers(f);
     }
   }
@@ -907,7 +881,13 @@ ValueHeadDesc::ValueHeadDesc(istream& in, int vrsn, bool binaryFloats) {
       name +
       Global::strprintf(": sv3Mul.inChannels (%d) != v2Mul.outChannels (%d)", sv3Mul.inChannels, v2Mul.outChannels));
 
-  if(version >= 8) {
+  if(version >= 9) {
+    if(sv3Mul.outChannels != 6)
+      throw StringError(name + Global::strprintf(": sv3Mul.outChannels (%d) != 6", sv3Mul.outChannels));
+    if(sv3Bias.numChannels != 6)
+      throw StringError(name + Global::strprintf(": sv3Bias.numChannels (%d) != 6", sv3Bias.numChannels));
+  }
+  else if(version >= 8) {
     if(sv3Mul.outChannels != 4)
       throw StringError(name + Global::strprintf(": sv3Mul.outChannels (%d) != 4", sv3Mul.outChannels));
     if(sv3Bias.numChannels != 4)
@@ -978,12 +958,14 @@ ModelDesc::ModelDesc(istream& in, bool binaryFloats) {
   in >> name;
   in >> version;
   if(in.fail())
-    throw StringError("Model failed to parse name or version. Is this a valid model file?");
+    throw StringError("Model failed to parse name or version. Is this a valid model file? You probably specified the wrong file.");
 
-  if(version < 0 || version > NNModelVersion::latestModelVersionImplemented)
-    throw StringError(name + ": model found unsupported version " + Global::intToString(version));
+  if(version < 0)
+    throw StringError("This neural net has an invalid version, you probably specified the wrong file. Supposed model version: " + Global::intToString(version));
   if(version < 3)
-    throw StringError("Version 0-2 neural nets no longer supported");
+    throw StringError("This neural net is from an extremely old version of KataGo and is no longer supported by the engine. Model version: " + Global::intToString(version));
+  if(version > NNModelVersion::latestModelVersionImplemented)
+    throw StringError("This neural net requires a newer KataGo version. Obtain a newer KataGo at https://github.com/lightvector/KataGo. Model version: " + Global::intToString(version));
 
   in >> numInputChannels;
   if(in.fail())
@@ -1124,7 +1106,7 @@ void ModelDesc::loadFromFileMaybeGZipped(const string& fileName, ModelDesc& desc
       descBuf = std::move(ModelDesc(in,binaryFloats));
     }
     else if(Global::isSuffix(lower,".txt.gz") || Global::isSuffix(lower,".bin.gz") || Global::isSuffix(lower,".gz")) {
-      string* compressed = new string();
+      std::unique_ptr<string> compressed = std::make_unique<string>();
       readEntireFileIntoString(fileName,*compressed);
 
       static constexpr size_t CHUNK_SIZE = 262144;
@@ -1141,7 +1123,6 @@ void ModelDesc::loadFromFileMaybeGZipped(const string& fileName, ModelDesc& desc
       zret = inflateInit2(&zs,windowBits);
       if(zret != Z_OK) {
         (void)inflateEnd(&zs);
-        delete compressed;
         throw StringError("Error while ungzipping file. Invalid model file?");
       }
 
@@ -1157,15 +1138,12 @@ void ModelDesc::loadFromFileMaybeGZipped(const string& fileName, ModelDesc& desc
         switch(zret) {
         case Z_NEED_DICT:
           (void)inflateEnd(&zs);
-          delete compressed;
           throw StringError("Error while ungzipping file, Z_NEED_DICT. Invalid model file?");
         case Z_DATA_ERROR:
           (void)inflateEnd(&zs);
-          delete compressed;
           throw StringError("Error while ungzipping file, Z_DATA_ERROR. Invalid model file?");
         case Z_MEM_ERROR:
           (void)inflateEnd(&zs);
-          delete compressed;
           throw StringError("Error while ungzipping file, Z_MEM_ERROR. Invalid model file?");
         default:
           break;
@@ -1178,7 +1156,6 @@ void ModelDesc::loadFromFileMaybeGZipped(const string& fileName, ModelDesc& desc
             break;
           //Otherwise, we're in trouble
           (void)inflateEnd(&zs);
-          delete compressed;
           throw StringError("Error while ungzipping file, reached unexpected end of input");
         }
       }
@@ -1187,7 +1164,7 @@ void ModelDesc::loadFromFileMaybeGZipped(const string& fileName, ModelDesc& desc
       //Clean up
       (void)inflateEnd(&zs);
       //Free up memory for compressed string
-      delete compressed;
+      compressed = nullptr;
 
       bool binaryFloats = !Global::isSuffix(lower,".txt.gz");
       try {
@@ -1226,7 +1203,7 @@ void ModelDesc::loadFromFileMaybeGZipped(const string& fileName, ModelDesc& desc
 
 
 Rules ModelDesc::getSupportedRules(const Rules& desiredRules, bool& supported) const {
-  static_assert(NNModelVersion::latestModelVersionImplemented == 8, "");
+  static_assert(NNModelVersion::latestModelVersionImplemented == 10, "");
   Rules rules = desiredRules;
   supported = true;
   if(version <= 6) {
@@ -1247,7 +1224,7 @@ Rules ModelDesc::getSupportedRules(const Rules& desiredRules, bool& supported) c
       supported = false;
     }
   }
-  else if(version <= 8) {
+  else if(version <= 10) {
     if(rules.koRule == Rules::KO_SPIGHT) {
       rules.koRule = Rules::KO_SITUATIONAL;
       supported = false;

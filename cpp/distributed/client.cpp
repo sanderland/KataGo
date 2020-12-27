@@ -77,9 +77,9 @@ static json parseJson(const httplib::Result& response) {
 //Hacky custom URL parsing, probably isn't fully general but should be good enough for now.
 struct Url {
   string originalString;
-  bool isSSL;
+  bool isSSL = true;
   string host;
-  int port;
+  int port = 0;
   string path;
 
   static Url parse(const string& s) {
@@ -126,22 +126,48 @@ struct Url {
 
     return ret;
   }
+
+  void replacePath(const string& newPath) {
+    originalString = "";
+    if(isSSL)
+      originalString += "https://";
+    else
+      originalString += "http://";
+    originalString += host;
+    if((isSSL && port != 443) || (!isSSL && port != 80))
+      originalString += ":" + Global::intToString(port);
+    originalString += newPath;
+    path = newPath;
+  }
 };
 
-static httplib::Result oneShotDownload(Logger* logger, const Url& url, const string& caCertsFile, size_t startByte, size_t endByte, std::function<bool(const char *data, size_t data_length)> f) {
+static httplib::Result oneShotDownload(
+  Logger* logger,
+  const Url& url,
+  const string& caCertsFile,
+  const string& proxyHost,
+  const int& proxyPort,
+  size_t startByte, //inclusive
+  size_t endByte, //inclusive
+  std::function<bool(const char *data, size_t data_length)> f
+) {
   httplib::Headers headers;
   if(startByte > 0) {
     headers.insert(std::make_pair("Range", Global::uint64ToString(startByte) + "-" + Global::uint64ToString(endByte)));
   }
 
   if(!url.isSSL) {
-    std::unique_ptr<httplib::Client> httpClient = std::unique_ptr<httplib::Client>(new httplib::Client(url.host, url.port));
+    std::unique_ptr<httplib::Client> httpClient = std::make_unique<httplib::Client>(url.host, url.port);
+    if(proxyHost != "")
+      httpClient->set_proxy(proxyHost.c_str(), proxyPort);
     //Avoid automatically decompressing .bin.gz files that get sent to us with "content-encoding: gzip"
     httpClient->set_decompress(false);
     return httpClient->Get(url.path.c_str(),headers,f);
   }
   else {
-    std::unique_ptr<httplib::SSLClient> httpsClient = std::unique_ptr<httplib::SSLClient>(new httplib::SSLClient(url.host, url.port));
+    std::unique_ptr<httplib::SSLClient> httpsClient = std::make_unique<httplib::SSLClient>(url.host, url.port);
+    if(proxyHost != "")
+      httpsClient->set_proxy(proxyHost.c_str(), proxyPort);
     httpsClient->set_ca_cert_path(caCertsFile.c_str());
     httpsClient->enable_server_certificate_verification(true);
     //Avoid automatically decompressing .bin.gz files that get sent to us with "content-encoding: gzip"
@@ -158,12 +184,30 @@ static httplib::Result oneShotDownload(Logger* logger, const Url& url, const str
   }
 }
 
-Connection::Connection(const string& serverUrl, const string& username, const string& password, const string& caCerts, Logger* lg)
-  :httpClient(NULL),
-   httpsClient(NULL),
+Connection::Connection(
+  const string& sUrl,
+  const string& usname,
+  const string& pswd,
+  const string& caCerts,
+  const string& pHost,
+  int pPort,
+  const string& mdmbu,
+  const bool mup,
+  Logger* lg
+)
+  :httpClient(),
+   httpsClient(),
    isSSL(false),
+   serverUrl(sUrl),
+   username(usname),
+   password(pswd),
    baseResourcePath(),
    caCertsFile(caCerts),
+   proxyHost(pHost),
+   proxyPort(pPort),
+   modelDownloadMirrorBaseUrl(mdmbu),
+   mirrorUseProxy(mup),
+   clientInstanceId(),
    logger(lg),
    rand(),
    mutex()
@@ -175,8 +219,18 @@ Connection::Connection(const string& serverUrl, const string& username, const st
   catch(const StringError& e) {
     throw StringError(string("Could not parse serverUrl in config: ") + e.what());
   }
+  if(modelDownloadMirrorBaseUrl != "") {
+    try {
+      Url mirrorUrl = Url::parse(modelDownloadMirrorBaseUrl);
+      (void)mirrorUrl;
+    }
+    catch(const StringError& e) {
+      throw StringError(string("Could not parse modelDownloadMirrorBaseUrl in config: ") + e.what());
+    }
+  }
 
   isSSL = url.isSSL;
+  clientInstanceId = Global::uint64ToHexString(rand.nextUInt64());
 
   baseResourcePath = url.path;
   if(Global::isSuffix(baseResourcePath,"/"))
@@ -189,12 +243,27 @@ Connection::Connection(const string& serverUrl, const string& username, const st
   logger->write("host: " + url.host);
   logger->write("port: " + Global::intToString(url.port));
   logger->write("baseResourcePath: " + baseResourcePath);
+  if(proxyHost != "") {
+    logger->write("proxyHost: " + proxyHost);
+    logger->write("proxyPort: "+ std::to_string(proxyPort));
+  }
 
   if(!isSSL) {
-    httpClient = new httplib::Client(url.host, url.port);
+    httpClient = std::make_unique<httplib::Client>(url.host, url.port);
+    if(proxyHost != "")
+      httpClient->set_proxy(proxyHost.c_str(),proxyPort);
   }
   else {
-    httpsClient = new httplib::SSLClient(url.host, url.port);
+    if(caCertsFile != "" && caCertsFile != "/dev/null") {
+      string contents = Global::readFile(caCertsFile);
+      if(contents.find("-----BEGIN CERTIFICATE-----") == string::npos) {
+        logger->write("WARNING: " + caCertsFile + " does not seem to contain pem-formatted certs. Are you sure this is the correct file?");
+      }
+    }
+
+    httpsClient = std::make_unique<httplib::SSLClient>(url.host, url.port);
+    if(proxyHost != "")
+      httpsClient->set_proxy(proxyHost.c_str(),proxyPort);
     httpsClient->set_ca_cert_path(caCertsFile.c_str());
     httpsClient->enable_server_certificate_verification(true);
   }
@@ -202,7 +271,7 @@ Connection::Connection(const string& serverUrl, const string& username, const st
   //Do an initial test query to make sure the server's there!
   auto response = get("/");
   if(response == nullptr) {
-    throw StringError("Could not connect to server at " + serverUrl + ", invalid host or port or otherwise no response");
+    throw StringError("Could not connect to server at " + serverUrl + ", invalid host or port, or SSL error, or some other httplib error, or no response");
   }
   else if(response->status != 200) {
     ostringstream out;
@@ -217,12 +286,33 @@ Connection::Connection(const string& serverUrl, const string& username, const st
   else {
     httpsClient->set_basic_auth(username.c_str(), password.c_str());
   }
-
 }
 
+void Connection::recreateClients() {
+  std::lock_guard<std::mutex> lock(mutex);
+  httpClient = nullptr;
+  httpsClient = nullptr;
+
+  Url url = Url::parse(serverUrl);
+
+  if(!isSSL) {
+    httpClient = std::make_unique<httplib::Client>(url.host, url.port);
+    if(proxyHost != "")
+      httpClient->set_proxy(proxyHost.c_str(),proxyPort);
+    httpClient->set_basic_auth(username.c_str(), password.c_str());
+  }
+  else {
+    httpsClient = std::make_unique<httplib::SSLClient>(url.host, url.port);
+    if(proxyHost != "")
+      httpsClient->set_proxy(proxyHost.c_str(),proxyPort);
+    httpsClient->set_ca_cert_path(caCertsFile.c_str());
+    httpsClient->enable_server_certificate_verification(true);
+    httpsClient->set_basic_auth(username.c_str(), password.c_str());
+  }
+}
+
+
 Connection::~Connection() {
-  delete httpClient;
-  delete httpsClient;
 }
 
 static string concatPaths(const string& baseResourcePath, const string& subPath) {
@@ -410,6 +500,7 @@ static constexpr int DEFAULT_MAX_TRIES = 100;
 static constexpr int LOOP_FATAL_FAIL = 0;
 static constexpr int LOOP_RETRYABLE_FAIL = 1;
 static constexpr int LOOP_PARTIAL_SUCCESS = 2;
+static constexpr int LOOP_PARTIAL_SUCCESS_NO_LOG = 3;
 
 bool Connection::retryLoop(const char* errorLabel, int maxTries, std::atomic<bool>& shouldStop, std::function<void(int&)> f) {
   if(shouldStop.load())
@@ -428,28 +519,36 @@ bool Connection::retryLoop(const char* errorLabel, int maxTries, std::atomic<boo
         return false;
 
       //Reset everything on partial success
-      if(loopFailMode == LOOP_PARTIAL_SUCCESS) {
+      if(loopFailMode == LOOP_PARTIAL_SUCCESS || loopFailMode == LOOP_PARTIAL_SUCCESS_NO_LOG) {
         i = 0;
         failureInterval = initialFailureInterval;
+      }
+      else {
+        //If something failed in a harder way, let's recreate the http and https clients, since otherwise
+        //sometimes it seems like they can get stuck and unrecoverable
+        recreateClients();
       }
 
       if(loopFailMode == LOOP_FATAL_FAIL || i >= maxTries-1)
         throw;
-      logger->write(string(errorLabel) + ": Error connecting to server, possibly an internet blip, or possibly the server is down or temporarily misconfigured, waiting about " + Global::doubleToString(failureInterval) + " seconds and trying again.");
-      logger->write(string("Error was:\n") + e.what());
+
+      if(loopFailMode != LOOP_PARTIAL_SUCCESS_NO_LOG) {
+        logger->write(string(errorLabel) + ": Error connecting to server, possibly an internet blip, or possibly the server is down or temporarily misconfigured, waiting about " + Global::doubleToString(failureInterval) + " seconds and trying again.");
+        logger->write(string("Error was:\n") + e.what());
+      }
 
       double intervalRemaining = failureInterval * (0.95 + rand.nextDouble(0.1));
       while(intervalRemaining > 0.0) {
         double sleepTime = std::min(intervalRemaining, stopPollFrequency);
         if(shouldStop.load())
           return false;
-        intervalRemaining -= sleepTime;
         std::this_thread::sleep_for(std::chrono::duration<double>(sleepTime));
+        intervalRemaining -= stopPollFrequency;
       }
       failureInterval = round(failureInterval * 1.3 + 1.0);
-      //Cap at three hours
-      if(failureInterval > 10800)
-        failureInterval = 10800;
+      //Cap at two hours
+      if(failureInterval > 7200)
+        failureInterval = 7200;
       continue;
     }
     if(i > 0)
@@ -470,7 +569,15 @@ static Client::ModelInfo parseModelInfo(const json& networkProperties) {
   return model;
 }
 
-bool Connection::getNextTask(Task& task, const string& baseDir, bool retryOnFailure, bool allowRatingTask, int taskRepFactor, std::atomic<bool>& shouldStop) {
+bool Connection::getNextTask(
+  Task& task,
+  const string& baseDir,
+  bool retryOnFailure,
+  bool allowSelfplayTask,
+  bool allowRatingTask,
+  int taskRepFactor,
+  std::atomic<bool>& shouldStop
+) {
   (void)baseDir;
 
   auto f = [&](int& loopFailMode) {
@@ -480,11 +587,19 @@ bool Connection::getNextTask(Task& task, const string& baseDir, bool retryOnFail
     while(true) {
       httplib::MultipartFormDataItems items = {
         { "git_revision", Version::getGitRevision(), "", "" },
+        { "client_instance_id", clientInstanceId, "", "" },
         { "task_rep_factor", Global::intToString(taskRepFactor), "", ""},
-        { "allow_selfplay_task", "true", "", ""},
+        { "allow_selfplay_task", (allowSelfplayTask ? "true" : "false"), "", ""},
         { "allow_rating_task", (allowRatingTask ? "true" : "false"), "", ""},
       };
-      response = parseJson(postMulti("/api/tasks/",items));
+      httplib::Result postResult = postMulti("/api/tasks/",items);
+      if(!allowRatingTask && postResult && postResult->status == 400 && postResult->body.find("server is only serving rating games right now") != string::npos) {
+        logger->write("Server is only serving rating games right now but we're full on how many we can accept, so we will sleep a while and then retry.");
+        loopFailMode = LOOP_PARTIAL_SUCCESS_NO_LOG;
+        std::this_thread::sleep_for(std::chrono::duration<double>(30.0));
+        throw StringError("Contacted server but rating games were full");
+      }
+      response = parseJson(postResult);
       string kind = parseString(response,"kind",32);
       if(kind == "rating" && !allowRatingTask) {
         std::this_thread::sleep_for(std::chrono::duration<double>(1.0));
@@ -574,6 +689,8 @@ bool Connection::getNextTask(Task& task, const string& baseDir, bool retryOnFail
 string Connection::getModelPath(const Client::ModelInfo& modelInfo, const string& modelDir) {
   if(modelInfo.isRandom)
     return "/dev/null";
+  if(Global::isSuffix(modelInfo.downloadUrl,".txt.gz"))
+    return modelDir + "/" + modelInfo.name + ".txt.gz";
   return modelDir + "/" + modelInfo.name + ".bin.gz";
 }
 string Connection::getTmpModelPath(const Client::ModelInfo& modelInfo, const string& modelDir) {
@@ -584,8 +701,43 @@ string Connection::getTmpModelPath(const Client::ModelInfo& modelInfo, const str
   string randStr;
   for(int i = 0; i<10; i++)
     randStr += chars[rand.nextUInt(len)];
+  if(Global::isSuffix(modelInfo.downloadUrl,".txt.gz"))
+    return modelDir + "/" + modelInfo.name + ".tmp." + randStr + ".txt.gz";
   return modelDir + "/" + modelInfo.name + ".tmp." + randStr + ".bin.gz";
 }
+
+void Client::ModelInfo::failIfSha256Mismatch(const string& modelPath) const {
+  if(isRandom)
+    return;
+  string contents = Global::readFileBinary(modelPath);
+  char hashResultBuf[65];
+  SHA2::get256((const uint8_t*)contents.data(), contents.size(), hashResultBuf);
+  string hashResult(hashResultBuf);
+  bool matching = Global::toLower(this->sha256) == Global::toLower(hashResult);
+  if(!matching)
+    throw StringError("Downloaded " + string(modelPath) + " sha256 was " + hashResult + " which does not match the expected sha256 " + this->sha256);
+}
+
+bool Connection::maybeDownloadNewestModel(
+  const string& modelDir, std::atomic<bool>& shouldStop
+) {
+  try {
+    json networkJson = parseJson(get("/api/networks/newest_training/"));
+    Client::ModelInfo modelInfo = parseModelInfo(networkJson);
+    return downloadModelIfNotPresent(modelInfo,modelDir,shouldStop);
+  }
+  catch(const StringError& e) {
+    logger->write(string("When downloading newest network got error parsing or connecting to server, will try again later: ") + e.what());
+  }
+  return false;
+}
+
+Client::DownloadState::DownloadState()
+  : downloadingInProgressVar(),
+    downloadingInProgress(false)
+{}
+Client::DownloadState::~DownloadState()
+{}
 
 bool Connection::downloadModelIfNotPresent(
   const Client::ModelInfo& modelInfo, const string& modelDir,
@@ -596,13 +748,70 @@ bool Connection::downloadModelIfNotPresent(
 
   const string path = getModelPath(modelInfo,modelDir);
 
-  //Model already exists
-  if(gfs::exists(gfs::path(path)))
-    return true;
+  std::unique_lock<std::mutex> lock(downloadStateMutex);
+  while(true) {
+    //Model already exists
+    if(gfs::exists(gfs::path(path)))
+      return true;
+    if(shouldStop.load())
+      return false;
 
-  Url url;
+    //Check if some other thread is downloading it
+    {
+      auto iter = downloadStateByUrl.find(modelInfo.downloadUrl);
+      if(iter != downloadStateByUrl.end()) {
+        logger->write("Other thread is downloading model already, sleeping");
+        std::shared_ptr<DownloadState> downloadState = iter->second;
+        //Wait until that thread is done
+        while(downloadState->downloadingInProgress) {
+          downloadState->downloadingInProgressVar.wait(lock);
+        }
+        logger->write("Woke up, other thread finished downloading model");
+        //Sleep a little while and then try again to see if we still need to download the model.
+        std::this_thread::sleep_for(std::chrono::duration<double>(2.0));
+        continue;
+      }
+    }
+
+    //No other thread is downloading it, so mark that we're downloading it.
+    logger->write("Beginning download of model " + modelInfo.name);
+    std::shared_ptr<DownloadState> downloadState = std::make_shared<DownloadState>();
+    downloadState->downloadingInProgress = true;
+    downloadStateByUrl[modelInfo.downloadUrl] = downloadState;
+    lock.unlock();
+
+    //Make absolutely sure we don't deadlock - mark that we're done after we're done.
+    std::function<void()> cleanup = [&]() {
+      lock.lock();
+      downloadState->downloadingInProgress = false;
+      downloadState->downloadingInProgressVar.notify_all();
+      downloadStateByUrl.erase(modelInfo.downloadUrl);
+      // logger->write("DEBUG: Releasing download lock of model " + modelInfo.name);
+      lock.unlock();
+    };
+    Global::CustomScopeGuard<std::function<void()>> guard(std::move(cleanup));
+    actuallyDownloadModel(modelInfo, modelDir, shouldStop);
+  }
+}
+
+bool Connection::actuallyDownloadModel(
+  const Client::ModelInfo& modelInfo, const string& modelDir,
+  std::atomic<bool>& shouldStop
+) {
+  if(modelInfo.isRandom)
+    return true;
+  const string path = getModelPath(modelInfo,modelDir);
+  Url urlToActuallyUse;
   try {
-    url = Url::parse(modelInfo.downloadUrl);
+    if(modelDownloadMirrorBaseUrl != "") {
+      Url urlFromServer = Url::parse(modelInfo.downloadUrl);
+      urlToActuallyUse = Url::parse(modelDownloadMirrorBaseUrl);
+      urlToActuallyUse.replacePath(urlFromServer.path);
+      logger->write("Attempting to download from mirror server: " + urlToActuallyUse.originalString);
+    }
+    else {
+      urlToActuallyUse = Url::parse(modelInfo.downloadUrl);
+    }
   }
   catch(const StringError& e) {
     throw StringError(string("Could not parse URL to download model: ") + e.what());
@@ -620,17 +829,29 @@ bool Connection::downloadModelIfNotPresent(
     size_t totalDataSize = 0;
 
     auto fInner = [&](int& innerLoopFailMode) {
+      if(totalDataSize >= modelInfo.bytes)
+        return;
       const size_t oldTotalDataSize = totalDataSize;
+      const size_t startByte = oldTotalDataSize;
+      const size_t endByte = modelInfo.bytes-1;
+      const string proxyHostToUse = mirrorUseProxy ? proxyHost : "";
       httplib::Result response = oneShotDownload(
-        logger, url, caCertsFile, oldTotalDataSize, modelInfo.bytes,
-        [&out,&totalDataSize,&shouldStop,this,&timer,&lastTime,&url,&modelInfo](const char* data, size_t data_length) {
+        logger, urlToActuallyUse, caCertsFile, proxyHostToUse, proxyPort, startByte, endByte,
+        [&out,&totalDataSize,&shouldStop,this,&timer,&lastTime,&urlToActuallyUse,&modelInfo](const char* data, size_t data_length) {
           out.write(data, data_length);
           totalDataSize += data_length;
           double nowTime = timer.getSeconds();
           if(nowTime > lastTime + 1.0) {
             lastTime = nowTime;
-            logger->write(string("Downloaded ") + Global::uint64ToString(totalDataSize) + " / " + Global::uint64ToString(modelInfo.bytes) + " bytes for model: " + url.originalString);
+            logger->write(
+              string("Downloaded ") +
+              Global::uint64ToString(totalDataSize) + " / " + Global::uint64ToString(modelInfo.bytes) +
+              " bytes for model: " + urlToActuallyUse.originalString
+            );
           }
+          //Something is wrong if we've downloaded more bytes than exist in the model. Halt the download at that point
+          if(totalDataSize > modelInfo.bytes)
+            return false;
           return !shouldStop.load();
         }
       );
@@ -674,29 +895,37 @@ bool Connection::downloadModelIfNotPresent(
       );
 
     //Verify hash to see if the file is as expected
-    {
-      string contents = Global::readFileBinary(tmpPath);
-      char hashResultBuf[65];
-      SHA2::get256((const uint8_t*)contents.data(), contents.size(), hashResultBuf);
-      string hashResult(hashResultBuf);
-      if(Global::toLower(modelInfo.sha256) != Global::toLower(hashResult))
-        throw StringError("Downloaded file sha256 was " + hashResult + " which does not match the expected sha256 " + modelInfo.sha256);
-    }
+    modelInfo.failIfSha256Mismatch(tmpPath);
 
     //Attempt to load the model file to verify gzip integrity and that we actually support this model format
     {
-      ModelDesc* descBuf = new ModelDesc();
-      ModelDesc::loadFromFileMaybeGZipped(tmpPath,*descBuf);
-      delete descBuf;
+      ModelDesc descBuf;
+      ModelDesc::loadFromFileMaybeGZipped(tmpPath,descBuf);
     }
 
     //Done! Rename the file into the right place
     std::rename(tmpPath.c_str(),path.c_str());
 
-    logger->write(string("Done downloading ") + Global::uint64ToString(totalDataSize) + " bytes for model: " + url.originalString);
+    logger->write(string("Done downloading ") + Global::uint64ToString(totalDataSize) + " bytes for model: " + urlToActuallyUse.originalString);
   };
-  const int maxTries = 2;
+  const int maxTries = 4;
   return retryLoop("downloadModelIfNotPresent",maxTries,shouldStop,fOuter);
+}
+
+static string getGameTypeStr(const FinishedGameData* gameData) {
+  static_assert(FinishedGameData::NUM_MODES == 8,"");
+  string gametype = (
+    gameData->mode == FinishedGameData::MODE_NORMAL ? "normal" :
+    gameData->mode == FinishedGameData::MODE_CLEANUP_TRAINING ? "cleanup_training" :
+    gameData->mode == FinishedGameData::MODE_FORK ? "fork" :
+    gameData->mode == FinishedGameData::MODE_HANDICAP ? "handicap" :
+    gameData->mode == FinishedGameData::MODE_SGFPOS ? "sgfpos" :
+    gameData->mode == FinishedGameData::MODE_HINTPOS ? "hintpos" :
+    gameData->mode == FinishedGameData::MODE_HINTFORK ? "hintfork" :
+    gameData->mode == FinishedGameData::MODE_ASYM ? "asym" :
+    "unknown"
+  );
+  return gametype;
 }
 
 bool Connection::uploadTrainingGameAndData(
@@ -727,16 +956,7 @@ bool Connection::uploadTrainingGameAndData(
     extraMetadata["playout_doubling_advantage"] = gameData->playoutDoublingAdvantage;
     extraMetadata["playout_doubling_advantage_pla"] = PlayerIO::playerToString(gameData->playoutDoublingAdvantagePla);
     extraMetadata["draw_equivalent_wins_for_white"] = gameData->drawEquivalentWinsForWhite;
-    static_assert(FinishedGameData::NUM_MODES == 6,"");
-    string gametype = (
-      gameData->mode == FinishedGameData::MODE_NORMAL ? "normal" :
-      gameData->mode == FinishedGameData::MODE_CLEANUP_TRAINING ? "cleanup_training" :
-      gameData->mode == FinishedGameData::MODE_FORK ? "fork" :
-      gameData->mode == FinishedGameData::MODE_HANDICAP ? "handicap" :
-      gameData->mode == FinishedGameData::MODE_SGFPOS ? "sgfpos" :
-      gameData->mode == FinishedGameData::MODE_HINTPOS ? "hintpos" :
-      "unknown"
-    );
+    string gametype = getGameTypeStr(gameData);
     string winner = gameData->endHist.winner == P_WHITE ? "W" : gameData->endHist.winner == P_BLACK ? "B" : gameData->endHist.isNoResult ? "-" : "0";
     double score = gameData->endHist.finalWhiteMinusBlackScore;
     string hasResigned = gameData->endHist.isResignation ? "true" : "false";
@@ -786,7 +1006,10 @@ bool Connection::uploadTrainingGameAndData(
     else if(response->status != 200 && response->status != 201 && response->status != 202) {
       ostringstream outs;
       debugPrintResponse(outs,response);
-      throw StringError("Server gave response that was not status code 200 OK or 201 Created or 202 Accepted\n" + outs.str());
+      throw StringError(
+        "When uploading " + sgfFilePath + " " + npzFilePath +
+        " server gave response that was not status code 200 OK or 201 Created or 202 Accepted\n" + outs.str()
+      );
     }
   };
   return retryLoop("uploadTrainingGameAndData",(retryOnFailure ? DEFAULT_MAX_TRIES : 1),shouldStop,f);
@@ -811,6 +1034,7 @@ bool Connection::uploadRatingGame(
     double komi = gameData->startHist.rules.komi;
     string rules = gameData->startHist.rules.toJsonStringNoKomi();
     json extraMetadata = json({});
+    string gametype = getGameTypeStr(gameData);
     string winner = gameData->endHist.winner == P_WHITE ? "W" : gameData->endHist.winner == P_BLACK ? "B" : gameData->endHist.isNoResult ? "-" : "0";
     double score = gameData->endHist.finalWhiteMinusBlackScore;
     string hasResigned = gameData->endHist.isResignation ? "true" : "false";
@@ -830,6 +1054,7 @@ bool Connection::uploadRatingGame(
       { "board_size_y", Global::intToString(boardSizeY), "", "" },
       { "handicap", Global::intToString(handicap), "", "" },
       { "komi", Global::doubleToString(komi), "", "" },
+      { "gametype", gametype, "", "" },
       { "rules", rules, "", "" },
       { "extra_metadata", extraMetadata.dump(), "", "" },
       { "winner", winner, "", "" },
@@ -853,7 +1078,7 @@ bool Connection::uploadRatingGame(
     if(response->status != 200 && response->status != 201 && response->status != 202) {
       ostringstream outs;
       debugPrintResponse(outs,response);
-      throw StringError("Server gave response that was not status code 200 OK or 201 Created or 202 Accepted\n" + outs.str());
+      throw StringError("When uploading " + sgfFilePath + " server gave response that was not status code 200 OK or 201 Created or 202 Accepted\n" + outs.str());
     }
   };
   return retryLoop("uploadRatingGame",(retryOnFailure ? DEFAULT_MAX_TRIES : 1),shouldStop,f);

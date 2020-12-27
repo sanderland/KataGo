@@ -888,7 +888,7 @@ struct Trunk {
 
   ConvLayer initialConv;
   MatMulLayer initialMatMul;
-  vector<pair<int, ResidualBlockIntf*>> blocks;
+  vector<pair<int, std::unique_ptr<ResidualBlockIntf>>> blocks;
   BatchNormLayer trunkTipBN;
   ActivationLayer trunkTipActivation;
 
@@ -907,17 +907,17 @@ struct Trunk {
   {
     for (int i = 0; i < numBlocks; ++i) {
       if (desc.blocks[i].first == ORDINARY_BLOCK_KIND) {
-        ResidualBlockDesc* blockDesc = (ResidualBlockDesc*)desc.blocks[i].second;
-        ResidualBlockIntf* block = new ResidualBlock(*blockDesc,nnX,nnY);
-        blocks.push_back(make_pair(ORDINARY_BLOCK_KIND, block));
+        ResidualBlockDesc* blockDesc = (ResidualBlockDesc*)desc.blocks[i].second.get();
+        std::unique_ptr<ResidualBlockIntf> block = std::make_unique<ResidualBlock>(*blockDesc,nnX,nnY);
+        blocks.push_back(make_pair(ORDINARY_BLOCK_KIND, std::move(block)));
       }
       else if (desc.blocks[i].first == DILATED_BLOCK_KIND) {
         throw StringError("Eigen backend: Dilated residual blocks are not supported right now");
       }
       else if (desc.blocks[i].first == GLOBAL_POOLING_BLOCK_KIND) {
-        GlobalPoolingResidualBlockDesc* blockDesc = (GlobalPoolingResidualBlockDesc*)desc.blocks[i].second;
-        GlobalPoolingResidualBlock* block = new GlobalPoolingResidualBlock(*blockDesc,nnX,nnY);
-        blocks.push_back(make_pair(GLOBAL_POOLING_BLOCK_KIND, block));
+        GlobalPoolingResidualBlockDesc* blockDesc = (GlobalPoolingResidualBlockDesc*)desc.blocks[i].second.get();
+        std::unique_ptr<GlobalPoolingResidualBlock> block = std::make_unique<GlobalPoolingResidualBlock>(*blockDesc,nnX,nnY);
+        blocks.push_back(make_pair(GLOBAL_POOLING_BLOCK_KIND, std::move(block)));
       }
       else {
         ASSERT_UNREACHABLE;
@@ -925,10 +925,7 @@ struct Trunk {
     }
   }
 
-  virtual ~Trunk() {
-    for (auto p : blocks) {
-      delete p.second;
-    }
+  ~Trunk() {
   }
 
   size_t requiredConvWorkspaceElts(size_t maxBatchSize) const {
@@ -965,7 +962,7 @@ struct Trunk {
 
     // apply blocks
     // Flip trunkBuf and trunkScratchBuf so that the result gets accumulated in trunkScratchBuf
-    for (auto block : blocks) {
+    for(auto& block : blocks) {
       block.second->apply(
         handle,
         trunkScratch,
@@ -1653,13 +1650,25 @@ void NeuralNet::getOutput(
       SymmetryHelpers::copyOutputsWithSymmetry(ownershipSrcBuf, output->whiteOwnerMap, 1, nnYLen, nnXLen, symmetry);
     }
 
-    if(version >= 8) {
+    if(version >= 9) {
+      int numScoreValueChannels = computeHandle->context->model.numScoreValueChannels;
+      assert(numScoreValueChannels == 6);
+      output->whiteScoreMean = scoreValueData[row * numScoreValueChannels];
+      output->whiteScoreMeanSq = scoreValueData[row * numScoreValueChannels + 1];
+      output->whiteLead = scoreValueData[row * numScoreValueChannels + 2];
+      output->varTimeLeft = scoreValueData[row * numScoreValueChannels + 3];
+      output->shorttermWinlossError = scoreValueData[row * numScoreValueChannels + 4];
+      output->shorttermScoreError = scoreValueData[row * numScoreValueChannels + 5];
+    }
+    else if(version >= 8) {
       int numScoreValueChannels = computeHandle->context->model.numScoreValueChannels;
       assert(numScoreValueChannels == 4);
       output->whiteScoreMean = scoreValueData[row * numScoreValueChannels];
       output->whiteScoreMeanSq = scoreValueData[row * numScoreValueChannels + 1];
       output->whiteLead = scoreValueData[row * numScoreValueChannels + 2];
       output->varTimeLeft = scoreValueData[row * numScoreValueChannels + 3];
+      output->shorttermWinlossError = 0;
+      output->shorttermScoreError = 0;
     }
     else if(version >= 4) {
       int numScoreValueChannels = computeHandle->context->model.numScoreValueChannels;
@@ -1668,6 +1677,8 @@ void NeuralNet::getOutput(
       output->whiteScoreMeanSq = scoreValueData[row * numScoreValueChannels + 1];
       output->whiteLead = output->whiteScoreMean;
       output->varTimeLeft = 0;
+      output->shorttermWinlossError = 0;
+      output->shorttermScoreError = 0;
     }
     else if(version >= 3) {
       int numScoreValueChannels = computeHandle->context->model.numScoreValueChannels;
@@ -1677,6 +1688,8 @@ void NeuralNet::getOutput(
       output->whiteScoreMeanSq = output->whiteScoreMean * output->whiteScoreMean;
       output->whiteLead = output->whiteScoreMean;
       output->varTimeLeft = 0;
+      output->shorttermWinlossError = 0;
+      output->shorttermScoreError = 0;
     }
     else {
       ASSERT_UNREACHABLE;
