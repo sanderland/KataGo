@@ -10,5 +10,5 @@ COPY . .
 RUN rm CMakeCache.txt
 RUN cmake . -DUSE_BACKEND=OPENCL -DNO_GIT_REVISION=1
 RUN make
-
+RUN strip katago
 
