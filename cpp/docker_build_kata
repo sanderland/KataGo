@@ -1,5 +1,30 @@
-docker build . -t katago --no-cache
+#!/bin/bash
+
+dockerfile="
+from debian:buster
+
+RUN apt-get update
+RUN apt-get install -y g++ git cmake libeigen3-dev ocl-icd-opencl-dev libzip-dev
+
+WORKDIR /KataGo
+COPY . .
+RUN rm CMakeCache.txt || true
+
+RUN cmake . -DUSE_BACKEND=OPENCL
+RUN make
+RUN strip katago
+RUN COPY katago katago-opencl
+
+RUN cmake . -DUSE_BACKEND=EIGEN
+RUN make
+RUN strip katago
+RUN COPY katago katago-eigen"
+
+
+echo $dockerfile > docker build -t katago --no-cache -
+
 id=$(docker create katago)
-docker cp $id:/KataGo/katago ../katago-docker-$id
-echo "New katago copied to ../katago-docker-$id"
+docker cp $id:/KataGo/katago-opencl ../katago-opencl
+docker cp $id:/KataGo/katago-eigen ../katago-eigen
+echo "Compiled KataGo binaries copied to ../katago-eigen and ../katago-opencl"
 docker rm -v $id

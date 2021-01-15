@@ -255,7 +255,6 @@ add_executable(katago
   dataio/numpywrite.cpp
   dataio/trainingwrite.cpp
   dataio/loadmodel.cpp
-  dataio/lzparse.cpp
   dataio/homedata.cpp
   neuralnet/nninputs.cpp
   neuralnet/modelversion.cpp
@@ -362,6 +361,17 @@ target_compile_definitions(katago PRIVATE NO_LIBZIP)
 if(USE_TCMALLOC)
   target_link_libraries(katago ${TCMALLOC_LIB})
 endif(USE_TCMALLOC)
+
+if(BUILD_DISTRIBUTED)
+  message(STATUS "-DBUILD_DISTRIBUTED=1 is set, compiling code and dependencies to contribute to distributed training")
+  target_compile_definitions(katago PRIVATE BUILD_DISTRIBUTED)
+  find_package(OpenSSL REQUIRED)
+  target_link_libraries(katago ${OPENSSL_SSL_LIBRARIES} ${OPENSSL_CRYPTO_LIBRARIES})
+  include_directories(${OPENSSL_INCLUDE_DIR})
+  include_directories(external/httplib)
+endif()
+
+#------------------------------------------------------------------------------------
 
 # add_compile_definitions(NDEBUG)
 
