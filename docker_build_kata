@@ -1,0 +1,9 @@
+#!/bin/bash
+
+docker build -t katago .
+
+id=$(docker create katago)
+docker cp $id:/KataGo/cpp/katago-opencl ../katago-opencl
+docker cp $id:/KataGo/cpp/katago-eigen ../katago-eigen
+echo "Compiled KataGo binaries copied to ../katago-eigen and ../katago-opencl"
+docker rm -v $id
